@@ -23,25 +23,14 @@ from image_preprocessing import ImagePreprocessor
 from PIL import Image  # Add this line
 import io  # Add this too
 from screenshot_capture import get_screenshot_data, cleanup_screenshot_capture
-import atexit
-import mysql.connector
-from mysql.connector import Error
-import bcrypt
-import secrets
-from functools import wraps
 
-def login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if 'user_id' not in session:
-            return jsonify({'error': 'Authentication required'}), 401
-        return f(*args, **kwargs)
-    return decorated_function
+
+
 # Disable SSL warnings for internal requests
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
-app.secret_key = 'phishing-detector-secret-key-2025-ibnsina'
+
 atexit.register(cleanup_screenshot_capture)
 # Google Safe Browsing API Configuration
 GOOGLE_SAFE_BROWSING_API_KEY = "AIzaSyB6vzz-SpCUVzB5nXdx9Mjag6Wg6cCH3Ok"
@@ -62,91 +51,7 @@ TRUSTED_SUBDOMAIN_PROVIDERS = {
     'medium.com': 'Medium',
     'weebly.com': 'Weebly'
 }
-DB_CONFIG = {
-    'host': 'localhost',
-    'user': 'root',
-    'password': '',
-    'database': 'phishing_detector_db'
-}
 
-def init_database():
-    """Initialize database and create tables if they don't exist"""
-    try:
-        conn = mysql.connector.connect(
-            host=DB_CONFIG['host'],
-            user=DB_CONFIG['user'],
-            password=DB_CONFIG['password']
-        )
-        cursor = conn.cursor()
-        
-        # Create database if it doesn't exist
-        cursor.execute(f"CREATE DATABASE IF NOT EXISTS {DB_CONFIG['database']}")
-        cursor.execute(f"USE {DB_CONFIG['database']}")
-        
-        # Create users table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                username VARCHAR(80) UNIQUE NOT NULL,
-                email VARCHAR(120) UNIQUE NOT NULL,
-                password_hash VARCHAR(255) NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_login TIMESTAMP NULL,
-                is_active BOOLEAN DEFAULT TRUE
-            )
-        ''')
-        
-        # Create scan history table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS scan_history (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                user_id INT,
-                url TEXT NOT NULL,
-                is_phishing BOOLEAN,
-                confidence FLOAT,
-                scan_method VARCHAR(100),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users(id)
-            )
-        ''')
-        
-        conn.commit()
-        cursor.close()
-        conn.close()
-        print("✅ Database initialized successfully!")
-        
-    except Error as e:
-        print(f"❌ Database initialization error: {e}")
-
-def get_db_connection():
-    """Get database connection"""
-    try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        return conn
-    except Error as e:
-        print(f"Database connection error: {e}")
-        return None
-
-def hash_password(password):
-    """Hash a password using bcrypt"""
-    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-
-def check_password(password, hashed):
-    """Check if password matches the hash"""
-    return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
-
-# Authentication decorator
-def login_required(f):
-    from functools import wraps
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if 'user_id' not in session:
-            return redirect(url_for('login'))
-        return f(*args, **kwargs)
-    return decorated_function
-
-# Initialize database on startup
-init_database()
 
 def is_valid_url(url):
     """
@@ -1394,10 +1299,14 @@ else:
     print("ℹ️  Ensemble model not found. Using original model only.")
 
 # Add the missing index route
+@app.route('/')
+def index():
+    """Main page - no authentication required"""
+    return render_template('index.html')
 
 @app.route('/scan', methods=['POST'])
-@login_required
 def scan_url():
+    """Scan URL - no authentication required"""
     if not models_loaded:
         return jsonify({
             'error': 'No models loaded. Please train the model first.'
@@ -1427,16 +1336,15 @@ def scan_url():
         # Check if it's a trusted subdomain first
         is_trusted, provider = is_trusted_subdomain(url)
 
-        # Extract features for ML fallback (this is fast - no network calls)
+        # Extract features for ML fallback
         features = extract_basic_url_features(url)
 
-        # Perform hybrid scanning - WITH ERROR HANDLING
+        # Perform hybrid scanning
         try:
             scan_results = hybrid_scan_url(url, features)
             print(f"🔍 SCAN RESULTS - Method: {scan_results.get('scan_method', 'unknown')}, Verdict: {scan_results.get('final_verdict', 'unknown')}")
         except Exception as scan_error:
             print(f"❌ Hybrid scan failed: {scan_error}")
-            # Fallback to basic analysis
             scan_results = {
                 'final_verdict': False,
                 'confidence': 0,
@@ -1444,26 +1352,22 @@ def scan_url():
                 'error': str(scan_error)
             }
 
-        # ✅ FIXED: Get screenshot data using the IMPORTED function
+        # Get screenshot data
         screenshot_response = {}
         image_analysis_result = {}
 
         try:
             screenshot_data = get_screenshot_data(url)
-
-            # ✅ FIXED: IMPROVED SCREENSHOT HANDLING FOR PIKWY API
             print(f"🔍 DEBUG - Screenshot data received: {screenshot_data}")
 
             if screenshot_data.get('success') or screenshot_data.get('filename'):
-                # Screenshot was successful
                 screenshot_filename = screenshot_data.get('filename')
                 if screenshot_filename:
                     screenshot_response['url'] = f"/static/screenshots/{screenshot_filename}"
                     screenshot_response['success'] = True
 
-                    # === IMAGE ANALYSIS ===
+                    # Image analysis
                     screenshot_path = os.path.join('static', 'screenshots', screenshot_filename)
-
                     try:
                         print(f"🖼️ Analyzing screenshot with image model: {screenshot_path}")
                         image_analysis = analyze_website_screenshot(screenshot_path)
@@ -1473,12 +1377,9 @@ def scan_url():
                         print(f"❌ Image analysis failed: {img_error}")
                         image_analysis_result = {'error': str(img_error)}
             else:
-                # Screenshot failed - but check if we still got a filename despite errors
                 if screenshot_data.get('filename'):
-                    # Even if API reported error, we might have a file
                     screenshot_filename = screenshot_data.get('filename')
                     screenshot_path = os.path.join('static', 'screenshots', screenshot_filename)
-
                     if os.path.exists(screenshot_path):
                         screenshot_response['url'] = f"/static/screenshots/{screenshot_filename}"
                         screenshot_response['success'] = True
@@ -1486,12 +1387,10 @@ def scan_url():
                     else:
                         screenshot_response['url'] = None
                         screenshot_response['error'] = screenshot_data.get('error', 'Unknown error')
-                        screenshot_response['note'] = screenshot_data.get('note', 'Screenshot capture failed')
                         screenshot_response['success'] = False
                 else:
                     screenshot_response['url'] = None
                     screenshot_response['error'] = screenshot_data.get('error', 'Unknown error')
-                    screenshot_response['note'] = screenshot_data.get('note', 'Screenshot capture failed')
                     screenshot_response['success'] = False
 
         except Exception as screenshot_error:
@@ -1499,11 +1398,10 @@ def scan_url():
             screenshot_response = {
                 'url': None,
                 'error': str(screenshot_error),
-                'note': 'Screenshot capture failed',
                 'success': False
             }
 
-        # Extract full analysis data for ALL URLs
+        # Extract analysis data
         contact_info = extract_contact_info(url)
         ssl_info = check_ssl_info(url)
         dns_info = get_dns_info(url)
@@ -1511,13 +1409,12 @@ def scan_url():
         reachability = check_website_reachability(url)
         threat_intel = get_threat_intelligence(url)
 
-        # ✅ FIXED: Safe access to scan results with defaults
+        # Prepare response
         final_verdict = scan_results.get('final_verdict', False)
         final_confidence = scan_results.get('confidence', 0)
         final_method = scan_results.get('scan_method', 'fallback')
         probability = scan_results.get('probability', 0)
 
-        # Prepare response
         result = {
             'url': url_input,
             'is_phishing': final_verdict,
@@ -1549,21 +1446,9 @@ def scan_url():
             'screenshot': screenshot_response
         }
 
-        # ✅ FIXED: Safe Google Safe Browsing access
-        google_safe_browsing = scan_results.get('google_safe_browsing')
-        if google_safe_browsing and isinstance(google_safe_browsing, dict):
-            result['google_safe_browsing_checked'] = True
-            result['google_safe_browsing_success'] = google_safe_browsing.get('success', False)
-            if not google_safe_browsing.get('success'):
-                result['google_safe_browsing_error'] = google_safe_browsing.get('error', 'Unknown error')
-            if google_safe_browsing.get('threat_types'):
-                result['threat_types'] = google_safe_browsing['threat_types']
-                result['special_message'] = f"⚠️ Confirmed threat by Google Safe Browsing: {', '.join(google_safe_browsing['threat_types'])}"
-
-        # Method-specific details
+        # Add method-specific messages
         if final_method == 'google_safe_browsing':
-            if 'special_message' not in result:
-                result['special_message'] = "⚠️ Google Safe Browsing detected threats"
+            result['special_message'] = "⚠️ Google Safe Browsing detected threats"
         elif final_method == 'ml_model':
             result['model_used'] = scan_results.get('model_used', 'unknown')
             if final_verdict:
@@ -1578,41 +1463,9 @@ def scan_url():
         else:
             result['special_message'] = "🔍 Basic analysis completed"
 
-        # Threat feed inclusion
-        in_threat_feed = any(url in ti_url for ti_url in threat_intelligence.keys())
-        if in_threat_feed:
-            threat_sources = []
-            for ti_url, ti_data in threat_intelligence.items():
-                if url in ti_url:
-                    threat_sources.append(ti_data.get('source', 'unknown'))
-            result['in_threat_feed'] = True
-            result['threat_sources'] = threat_sources
-            if 'special_message' not in result:
-                result['special_message'] = f"⚠️ Also found in threat intelligence: {', '.join(threat_sources)}"
-
-        # ✅ NEW: Save scan history to database
-        try:
-            if 'user_id' in session:
-                conn = get_db_connection()
-                if conn:
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        "INSERT INTO scan_history (user_id, url, is_phishing, confidence, scan_method) VALUES (%s, %s, %s, %s, %s)",
-                        (session['user_id'], url_input, final_verdict, probability, final_method)
-                    )
-                    conn.commit()
-                    cursor.close()
-                    conn.close()
-                    print(f"✅ Scan history saved for user {session['user_id']}")
-        except Exception as db_error:
-            print(f"❌ Error saving scan history: {db_error}")
-            # Don't return error - just log it and continue
-
-        # ✅ FIXED: Debug info
         print(f"🔍 FINAL RESULT - URL: {url_input}")
         print(f"🔍 FINAL RESULT - Method: {final_method}")
         print(f"🔍 FINAL RESULT - Verdict: {'PHISHING' if final_verdict else 'LEGITIMATE'}")
-        print(f"🔍 FINAL RESULT - Confidence: {final_confidence}%")
 
         return jsonify(result)
 
@@ -1620,323 +1473,16 @@ def scan_url():
         print(f"❌ CRITICAL ERROR: {e}")
         return jsonify({'error': f'Error processing URL: {str(e)}'}), 500
 
-
-
-@app.route('/analyze-image', methods=['POST'])
-def analyze_image():
-    if 'image' not in request.files:
-        return jsonify({'error': 'No image file provided'}), 400
-    
-    image_file = request.files['image']
-    if image_file.filename == '':
-        return jsonify({'error': 'No image selected'}), 400
-    
-    # Validate file type
-    allowed_extensions = {'png', 'jpg', 'jpeg', 'gif', 'bmp'}
-    if '.' not in image_file.filename or \
-       image_file.filename.rsplit('.', 1)[1].lower() not in allowed_extensions:
-        return jsonify({'error': 'Invalid file type. Please upload an image (PNG, JPG, JPEG, GIF, BMP)'}), 400
-    
-    upload_dir = 'static/uploads'
-    os.makedirs(upload_dir, exist_ok=True)
-    filename = f"{uuid.uuid4()}_{image_file.filename}"
-    image_path = os.path.join(upload_dir, filename)
-    
-    try:
-        image_file.save(image_path)
-        
-        # Verify the image was saved and is readable
-        try:
-            with Image.open(image_path) as img:
-                img.verify()  # Verify it's a valid image
-        except Exception as e:
-            os.remove(image_path)  # Clean up invalid file
-            return jsonify({'error': 'Invalid image file'}), 400
-        
-        # Analyze image
-        result = analyze_website_screenshot(image_path)
-        result['image_filename'] = filename
-        result['image_url'] = f"/static/uploads/{filename}"  # Add URL for frontend
-        
-        return jsonify(result)
-        
-    except Exception as e:
-        # Clean up on error
-        if os.path.exists(image_path):
-            os.remove(image_path)
-        return jsonify({'error': f'Error processing image: {str(e)}'}), 500
-    
-from flask import send_from_directory
-
-@app.route('/static/screenshots/<filename>')
-def serve_screenshot(filename):
-    """Serve screenshot files directly"""
-    try:
-        return send_from_directory('static/screenshots', filename)
-    except FileNotFoundError:
-        return "Screenshot not found", 404
-
-
-@app.route('/api/scan', methods=['GET'])
-def api_scan():
-    """API endpoint for external use"""
-    url_input = request.args.get('url', '').strip()
-    
-    if not url_input:
-        return jsonify({'error': 'URL parameter is required'}), 400
-    
-    if not models_loaded:
-        return jsonify({'error': 'Service unavailable'}), 503
-    
-    try:
-        # Add protocol if missing for validation
-        test_url = url_input
-        if not url_input.startswith(('http://', 'https://')):
-            test_url = 'https://' + url_input
-        
-        # Validate URL
-        if not is_valid_url(test_url):
-            return jsonify({'error': 'Invalid URL format'}), 400
-        
-        url = test_url
-        
-        # Check if trusted subdomain
-        is_trusted, provider = is_trusted_subdomain(url)
-        
-        features = extract_basic_url_features(url)
-        
-        # Perform hybrid scanning
-        scan_results = hybrid_scan_url(url, features)
-        
-        # Get screenshot data
-        screenshot_data = get_screenshot_data(url)
-        
-        # Process screenshot data for API response
-        screenshot_url = None
-        if screenshot_data.get('url'):
-            screenshot_url = screenshot_data['url']
-        elif screenshot_data.get('filename'):
-            screenshot_url = f"/static/screenshots/{screenshot_data['filename']}"
-        
-        # Extract additional data for API response
-        contact_info = extract_contact_info(url)
-        ssl_info = check_ssl_info(url)
-        dns_info = get_dns_info(url)
-        domain_age = get_domain_age(url)
-        reachability = check_website_reachability(url)
-        threat_intel = get_threat_intelligence(url)
-        
-        # Threat intelligence check
-        in_threat_feed = any(url in ti_url for ti_url in threat_intelligence.keys())
-        threat_sources = []
-        if in_threat_feed:
-            for ti_url, ti_data in threat_intelligence.items():
-                if url in ti_url:
-                    threat_sources.append(ti_data.get('source', 'unknown'))
-        
-        response = {
-            'url': url_input,
-            'phishing': scan_results['final_verdict'],
-            'probability': scan_results.get('probability', 0),
-            'confidence': scan_results['confidence'],
-            'scan_method': scan_results['scan_method'],
-            'safe': not scan_results['final_verdict'],
-            'in_threat_feed': in_threat_feed,
-            'trusted_subdomain': is_trusted,
-            'screenshot_url': screenshot_url,
-            
-            # New fields for API
-            'contacts_found': contact_info,
-            'features': {
-                'has_ssl': ssl_info['has_ssl'],
-                'ssl_expiry': ssl_info['ssl_expiry'],
-                'dns_records': dns_info['dns_records'],
-                'domain_age': domain_age,
-                'reachable': reachability['reachable'],
-                'response_time': reachability['response_time']
-            },
-            'threat_intel': threat_intel
-        }
-        
-        # Add screenshot error if any
-        if screenshot_data.get('error'):
-            response['screenshot_error'] = screenshot_data['error']
-        
-        # Add probability for ML results
-        if scan_results['scan_method'] == 'ml_model':
-            response['model_used'] = scan_results.get('model_used', 'unknown')
-        
-        # Add threat types for Google results
-        if scan_results['scan_method'] == 'google_safe_browsing':
-            response['threat_types'] = scan_results.get('threat_types', [])
-        
-        if is_trusted:
-            response['trusted_platform'] = provider
-        
-        return jsonify(response)
-    
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/')
-def landing():
-    """Landing page with IP detection"""
-    return render_template('landing.html')
-
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    """Login page"""
-    if request.method == 'POST':
-        username = request.form.get('username')
-        password = request.form.get('password')
-        
-        conn = get_db_connection()
-        if conn:
-            try:
-                cursor = conn.cursor(dictionary=True)
-                cursor.execute("SELECT * FROM users WHERE username = %s AND is_active = TRUE", (username,))
-                user = cursor.fetchone()
-                
-                if user and check_password(password, user['password_hash']):
-                    session['user_id'] = user['id']
-                    session['username'] = user['username']
-                    
-                    # Update last login
-                    cursor.execute("UPDATE users SET last_login = NOW() WHERE id = %s", (user['id'],))
-                    conn.commit()
-                    
-                    flash('Login successful!', 'success')
-                    return redirect(url_for('dashboard'))
-                else:
-                    flash('Invalid username or password', 'error')
-                    
-            except Error as e:
-                flash('Database error occurred', 'error')
-            finally:
-                cursor.close()
-                conn.close()
-        else:
-            flash('Database connection failed', 'error')
-    
-    return render_template('login.html')
-
-@app.route('/register', methods=['GET', 'POST'])
-def register():
-    """Registration page"""
-    if request.method == 'POST':
-        username = request.form.get('username')
-        email = request.form.get('email')
-        password = request.form.get('password')
-        confirm_password = request.form.get('confirm_password')
-        
-        # Basic validation
-        if not all([username, email, password, confirm_password]):
-            flash('All fields are required', 'error')
-            return render_template('register.html')
-        
-        if password != confirm_password:
-            flash('Passwords do not match', 'error')
-            return render_template('register.html')
-        
-        if len(password) < 6:
-            flash('Password must be at least 6 characters long', 'error')
-            return render_template('register.html')
-        
-        conn = get_db_connection()
-        if conn:
-            try:
-                cursor = conn.cursor()
-                
-                # Check if username or email already exists
-                cursor.execute("SELECT id FROM users WHERE username = %s OR email = %s", (username, email))
-                if cursor.fetchone():
-                    flash('Username or email already exists', 'error')
-                    return render_template('register.html')
-                
-                # Create new user
-                password_hash = hash_password(password)
-                cursor.execute(
-                    "INSERT INTO users (username, email, password_hash) VALUES (%s, %s, %s)",
-                    (username, email, password_hash)
-                )
-                conn.commit()
-                
-                flash('Registration successful! Please login.', 'success')
-                return redirect(url_for('login'))
-                
-            except Error as e:
-                flash('Registration failed. Please try again.', 'error')
-            finally:
-                cursor.close()
-                conn.close()
-        else:
-            flash('Database connection failed', 'error')
-    
-    return render_template('register.html')
-
-@app.route('/logout')
-def logout():
-    """Logout user"""
-    session.clear()
-    flash('You have been logged out successfully', 'success')
-    return redirect(url_for('landing'))
-
-@app.route('/dashboard')
-@login_required
-def dashboard():  # Changed from 'index' to 'dashboard'
-    return render_template('index.html', username=session.get('username'))
-
-# Update the scan route to require login and save history
-
-@app.route('/profile')
-@login_required
-def profile():
-    """User profile page"""
-    conn = get_db_connection()
-    user_data = None
-    scan_history = []
-    
-    if conn:
-        try:
-            cursor = conn.cursor(dictionary=True)
-            
-            # Get user data
-            cursor.execute("SELECT username, email, created_at, last_login FROM users WHERE id = %s", (session['user_id'],))
-            user_data = cursor.fetchone()
-            
-            # Get scan history
-            cursor.execute("""
-                SELECT url, is_phishing, confidence, scan_method, created_at 
-                FROM scan_history 
-                WHERE user_id = %s 
-                ORDER BY created_at DESC 
-                LIMIT 10
-            """, (session['user_id'],))
-            scan_history = cursor.fetchall()
-            
-        except Error as e:
-            flash('Error loading profile data', 'error')
-        finally:
-            cursor.close()
-            conn.close()
-    
-    return render_template('profile.html', user_data=user_data, scan_history=scan_history)    
-    
+# [KEEP YOUR OTHER ROUTES - analyze-image, api/scan, serve_screenshot]
 
 if __name__ == '__main__':
-    # Clear any cached port issues
-    import os
-    os.system('cls' if os.name == 'nt' else 'clear')  # Clear console
-    
     print("🚀 Starting Flask Phishing Detector Server...")
     print("📍 Local: http://127.0.0.1:5000")
-    print("🌐 Network: http://0.0.0.0:5000")
-    print("⏹️  Press CTRL+C to stop")
-    print("-" * 50)
-    
     try:
         app.run(debug=True, host='0.0.0.0', port=5000, use_reloader=False)
     except Exception as e:
         print(f"❌ Error starting server: {e}")
-        print("💡 Try changing the port to 5001:")
         app.run(debug=True, host='0.0.0.0', port=5001, use_reloader=False)
+
+
+
