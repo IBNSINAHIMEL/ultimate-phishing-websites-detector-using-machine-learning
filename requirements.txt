@@ -4,7 +4,7 @@ gunicorn==21.2.0
 
 # Data Processing & ML
 pandas==2.2.2
-numpy==2.1.2
+numpy==1.24.3
 scikit-learn==1.5.2
 tensorflow==2.13.0
 xgboost==2.0.3
@@ -26,4 +26,4 @@ urllib3==2.0.4
 
 # Utilities
 joblib==1.4.2
-gdown==4.7.1  # Add this for Google Drive downloads
+gdown==4.7.1
