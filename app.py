@@ -35,7 +35,8 @@ app = Flask(__name__)
 
 atexit.register(cleanup_screenshot_capture)
 # Google Safe Browsing API Configuration
-GOOGLE_SAFE_BROWSING_API_KEY = "AIzaSyB6vzz-SpCUVzB5nXdx9Mjag6Wg6cCH3Ok"
+GOOGLE_SAFE_BROWSING_API_KEY = os.environ.get('GOOGLE_SAFE_BROWSING_API_KEY', '')
+
 GOOGLE_SAFE_BROWSING_URL = "https://safebrowsing.googleapis.com/v4/threatMatches:find"
 
 
@@ -1514,6 +1515,7 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"❌ Error starting server: {e}")
         app.run(debug=True, host='0.0.0.0', port=5001, use_reloader=False)
+
 
 
 
