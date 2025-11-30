@@ -54,36 +54,7 @@ TRUSTED_SUBDOMAIN_PROVIDERS = {
     'weebly.com': 'Weebly'
 }
 
-def download_large_model():
-    """Download large ML model from Google Drive if not exists"""
-    model_path = 'models/ensemble_model.pkl'  # Adjust filename as needed
-    google_drive_url = "https://drive.google.com/uc?id=1NM9GNh-qolCMTxk3B3ds-4zjGf8uqrex"
-    
-    if not os.path.exists(model_path):
-        print("📥 Downloading large ML model from Google Drive...")
-        try:
-            # Create models directory if it doesn't exist
-            os.makedirs('models', exist_ok=True)
-            
-            # Download using gdown (more reliable for Google Drive)
-            gdown.download(google_drive_url, model_path, quiet=False)
-            print("✅ Large model downloaded successfully!")
-            
-        except Exception as e:
-            print(f"❌ Failed to download model: {e}")
-            # Fallback to requests
-            try:
-                response = requests.get(f"https://drive.google.com/uc?export=download&id=1NM9GNh-qolCMTxk3Bds-4zjGf8uqrex")
-                with open(model_path, 'wb') as f:
-                    f.write(response.content)
-                print("✅ Large model downloaded via fallback method!")
-            except Exception as e2:
-                print(f"❌ Fallback download also failed: {e2}")
-    else:
-        print("✅ Large model already exists!")
 
-# Call this function before loading models
-download_large_model()
 def is_valid_url(url):
     """
     Validate if the input is a proper URL
@@ -1291,7 +1262,36 @@ def check_google_safe_browsing_improved(url):
     if not result.get('success'):
         return {'status': 'API Error', 'error': result.get('error')}
     return {'status': 'Threat' if result['is_threat'] else 'Clean'}    
+def download_large_model():
+    """Download large ML model from Google Drive if not exists"""
+    model_path = 'models/ensemble_model.pkl'  # Adjust filename as needed
+    google_drive_url = "https://drive.google.com/uc?id=1NM9GNh-qolCMTxk3B3ds-4zjGf8uqrex"
     
+    if not os.path.exists(model_path):
+        print("📥 Downloading large ML model from Google Drive...")
+        try:
+            # Create models directory if it doesn't exist
+            os.makedirs('models', exist_ok=True)
+            
+            # Download using gdown (more reliable for Google Drive)
+            gdown.download(google_drive_url, model_path, quiet=False)
+            print("✅ Large model downloaded successfully!")
+            
+        except Exception as e:
+            print(f"❌ Failed to download model: {e}")
+            # Fallback to requests
+            try:
+                response = requests.get(f"https://drive.google.com/uc?export=download&id=1NM9GNh-qolCMTxk3Bds-4zjGf8uqrex")
+                with open(model_path, 'wb') as f:
+                    f.write(response.content)
+                print("✅ Large model downloaded via fallback method!")
+            except Exception as e2:
+                print(f"❌ Fallback download also failed: {e2}")
+    else:
+        print("✅ Large model already exists!")
+
+# Call this function before loading models
+download_large_model()    
 # Load both models
 MODEL_PATHS = {
     'original': 'models/phishing_model.pkl',
@@ -1514,6 +1514,7 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"❌ Error starting server: {e}")
         app.run(debug=True, host='0.0.0.0', port=5001, use_reloader=False)
+
 
 
 
