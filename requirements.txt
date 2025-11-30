@@ -1,0 +1,32 @@
+# Web Framework
+flask==2.3.3
+gunicorn==21.2.0
+
+# Database
+mysql-connector-python==8.0.33
+bcrypt==4.0.1
+
+# Data Processing & ML
+pandas==2.2.2
+numpy==2.1.2
+scikit-learn==1.5.2
+tensorflow==2.13.0
+xgboost==2.0.3
+lightgbm==4.3.0
+
+# Computer Vision & Image Processing
+opencv-python==4.8.1.78
+Pillow==10.0.0
+matplotlib==3.7.2
+seaborn==0.12.2
+
+# Network & Security
+requests==2.31.0
+tldextract==5.1.1
+python-whois==0.8.0
+dnspython==2.4.2
+idna==3.4
+urllib3==2.0.4
+
+# Utilities
+joblib==1.4.2

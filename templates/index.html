@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phishing and Scam Website Detector</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+    
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Phishing and Scam Website Detector</h1>
+            <p>Protect yourself from malicious websites</p>
+        </header>
+
+        <main>
+            <div class="scan-section">
+                <h2>Scan a URL</h2>
+
+                <div class="detector-options">
+                    <button id="phishingDetectorBtn" class="detector-btn active">Phishing Website Detector</button>
+                    <button id="scamDetectorBtn" class="detector-btn">Scam or Legit Website Detector</button>
+                </div>
+
+                <!-- Phishing Detector -->
+                <div id="phishingMode" class="detector-mode active">
+                    <div class="mode-description">
+                        <p>Detects phishing attempts that try to steal your personal information.</p>
+                    </div>
+                    <div class="input-group">
+                        <input type="text" id="urlInput" placeholder="Enter URL to scan (e.g., https://example.com)">
+                        <button id="scanBtn">Scan</button>
+                    </div>
+                </div>
+
+                <!-- Scam Detector -->
+                <div id="scamMode" class="detector-mode">
+                    <div class="mode-description">
+                        <p>Specifically designed to help freelancers identify scam job offers and client websites.</p>
+                    </div>
+                    <div class="input-group">
+                        <input type="text" id="scamUrlInput" placeholder="Enter client website or job posting URL">
+                        <button id="scamScanBtn">Scan</button>
+                    </div>
+                </div>
+                
+
+<!-- WITH THIS: -->
+    <div id="loading" class="loading-container hidden">
+    <div class="loading-steps">
+        <h3>🔍 Scanning Website...</h3>
+        <div class="step active" id="step1">
+            <span class="step-icon">⏳</span>
+            <span class="step-text">Validating URL</span>
+        </div>
+        <div class="step" id="step2">
+            <span class="step-icon">⏳</span>
+            <span class="step-text">Checking Google Safe Browsing</span>
+        </div>
+        <div class="step" id="step3">
+            <span class="step-icon">⏳</span>
+            <span class="step-text">Analyzing website content</span>
+        </div>
+        <div class="step" id="step4">
+            <span class="step-icon">⏳</span>
+            <span class="step-text">Capturing screenshot</span>
+        </div>
+        <div class="step" id="step5">
+            <span class="step-icon">⏳</span>
+            <span class="step-text">Final analysis</span>
+        </div>
+        <div class="progress-bar">
+            <div class="progress-fill" id="progressFill"></div>
+        </div>
+        <p class="loading-time" id="loadingTime">Elapsed time: 0s</p>
+        </div>
+        </div>
+                
+                <div id="result" class="result hidden"></div>
+            </div>
+
+            <!-- New Analysis Sections -->
+            <div id="analysisSections" class="analysis-sections">
+                <!-- Contact Information Section -->
+                <div class="analysis-section">
+                    <h3 class="section-title">Contact Information Found</h3>
+                    <div class="contact-grid">
+                        <div class="contact-category">
+                            <h4>Email Addresses</h4>
+                            <ul class="contact-list" id="emailList">
+                                <li class="no-contact">No email addresses found</li>
+                            </ul>
+                        </div>
+                        <div class="contact-category">
+                            <h4>Phone Numbers</h4>
+                            <ul class="contact-list" id="phoneList">
+                                <li class="no-contact">No phone numbers found</li>
+                            </ul>
+                        </div>
+                        <div class="contact-category">
+                            <h4>Contact Pages</h4>
+                            <ul class="contact-list" id="contactPageList">
+                                <li class="no-contact">No contact pages found</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Website Screenshot Section -->
+                <div class="analysis-section">
+    <h3 class="section-title">Website Screenshot</h3>
+    <div class="screenshot-container" id="screenshotContainer">
+        <div class="screenshot-placeholder">
+            <p>Screenshot will be displayed here after analysis</p>
+        </div>
+    </div>
+    
+    <!-- Image Analysis Container -->
+    <div id="imageAnalysisResult" class="image-analysis-container">
+        <h4 class="image-analysis-title">🖼️ Image Analysis</h4>
+        <div id="imageAnalysisContent" class="image-analysis-content">
+            <!-- Image analysis results will appear here -->
+        </div>
+    </div>
+</div>
+
+                <!-- Technical Analysis Section -->
+                <div class="analysis-section">
+                    <h3 class="section-title">Technical Analysis</h3>
+                    <div class="tech-grid">
+                        <!-- SSL Certificate -->
+                        <div class="tech-category">
+                            <h4>SSL Certificate</h4>
+                            <div class="tech-item">
+                                <span>Status:</span>
+                                <span class="tech-value status-info" id="sslStatus">Checking...</span>
+                            </div>
+                            <div class="tech-item">
+                                <span>Expires:</span>
+                                <span class="tech-value" id="sslExpiry">N/A</span>
+                            </div>
+                        </div>
+
+                        <!-- DNS Records -->
+                        <div class="tech-category">
+                            <h4>DNS Records</h4>
+                            <div class="tech-item">
+                                <span>Records Found:</span>
+                                <span class="tech-value" id="dnsCount">Checking...</span>
+                            </div>
+                            <div class="tech-item">
+                                <span>Domain Age:</span>
+                                <span class="tech-value" id="domainAge">N/A</span>
+                            </div>
+                        </div>
+
+                        <!-- Threat Intelligence -->
+                        <div class="tech-category">
+                            <h4>Threat Intelligence</h4>
+                            <div class="tech-item">
+                                <span>Safe Browsing:</span>
+                                <span class="tech-value status-info" id="safeBrowsing">Checking...</span>
+                            </div>
+                            <div class="tech-item">
+                                <span>Blacklist Status:</span>
+                                <span class="tech-value status-safe" id="blacklistStatus">Clean</span>
+                            </div>
+                        </div>
+
+                        <!-- Website Reachability -->
+                        <div class="tech-category">
+                            <h4>Website Reachability</h4>
+                            <div class="tech-item">
+                                <span>Status:</span>
+                                <span class="tech-value status-info" id="reachabilityStatus">Checking...</span>
+                            </div>
+                            <div class="tech-item">
+                                <span>Response Time:</span>
+                                <span class="tech-value" id="responseTime">N/A</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="freelancer-section">
+                <h3>Freelancer Protection Guide</h3>
+                <p>As a freelancer, you're particularly vulnerable to online scams. Our specialized detector checks for:</p>
+
+                <div class="freelancer-tips">
+                    <div class="tip-card">
+                        <h4>Fake Job Platforms</h4>
+                        <p>Identifies fraudulent freelancing websites that don't pay or steal your work.</p>
+                    </div>
+                    <div class="tip-card">
+                        <h4>Client Verification</h4>
+                        <p>Checks if client websites are legitimate businesses with proper online presence.</p>
+                    </div>
+                    <div class="tip-card">
+                        <h4>Payment Scams</h4>
+                        <p>Detects websites known for payment fraud or unrealistic payment promises.</p>
+                    </div>
+                    <div class="tip-card">
+                        <h4>Identity Theft</h4>
+                        <p>Identifies sites that may be collecting personal information for malicious purposes.</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="info-section">
+                <h3>About This Tool</h3>
+                <p>This phishing detector uses machine learning to analyze website URLs and identify potential threats. It examines various features including domain characteristics, suspicious patterns, and URL structure.</p>
+
+                <div class="features">
+                    <h4>Features Detected:</h4>
+                    <ul>
+                        <li>URL length and structure analysis</li>
+                        <li>Domain and subdomain characteristics</li>
+                        <li>Suspicious keywords and patterns</li>
+                        <li>IP address usage detection</li>
+                        <li>TLD (Top-Level Domain) analysis</li>
+                    </ul>
+                </div>
+
+                <div class="api-info">
+                    <h4>API Access</h4>
+                    <p>For research purposes, API access will be available in the future.</p>
+                    <code>GET /api/scan?url=YOUR_URL_HERE</code>
+                </div>
+            </div>
+        </main>
+
+        <footer>
+            <p>For research and educational purposes only</p>
+        </footer>
+    </div>
+
+<script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
