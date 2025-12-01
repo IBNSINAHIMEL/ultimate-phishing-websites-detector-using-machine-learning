@@ -1,42 +1,67 @@
-# ========== NUMPY COMPATIBILITY FIX - MUST BE AT THE VERY TOP ==========
-import numpy as np
+# ========== CRITICAL: NUMPY COMPATIBILITY FIX ==========
+# This MUST be the FIRST thing in the file
 import sys
 import os
 
-# CRITICAL FIX for Python 3.11 numpy compatibility
+# Force numpy to be imported with proper structure
+os.environ['NUMPY_DEPRECATED_WARNINGS'] = '0'
+
+# Import numpy with special handling
+import numpy as np
+
+# CRITICAL FIX for Python 3.11 + numpy 1.24.3 + TensorFlow 2.13.0
+# Create the missing module structure that TensorFlow expects
 try:
-    # Create the missing _core module reference for numpy 1.24.3
-    if not hasattr(np, '_core'):
-        try:
-            # Try to import numpy._core if available (numpy >= 1.25)
-            import numpy._core as _core
-            np._core = _core
-        except ImportError:
-            # For numpy 1.24.3, create the necessary structure
-            class DummyCore:
-                def __init__(self):
-                    self.multiarray = np
-                    self._multiarray_umath = np
-                    self.umath = np
-                    self.overrides = np
-                    self._dtype_meta = np
-                
-                def __getattr__(self, name):
-                    return getattr(np, name, None)
-            
-            np._core = DummyCore()
-            np.core = np._core
-        
-    # Also ensure np.core exists
+    # Check if np.core exists
     if not hasattr(np, 'core'):
-        np.core = np
+        # Create a minimal core module structure
+        import types
         
+        # Create a fake core module
+        class FakeCoreModule(types.ModuleType):
+            def __init__(self):
+                super().__init__('core')
+                self.numerictypes = None
+                self._multiarray_umath = None
+                self.multiarray = None
+                self.umath = None
+                self.overrides = None
+            
+            def __getattr__(self, name):
+                # Return appropriate fallback
+                if name == 'numerictypes':
+                    # Create numerictypes with ScalarType
+                    class NumericTypes:
+                        ScalarType = (int, float, complex, np.int8, np.int16, np.int32, 
+                                     np.int64, np.uint8, np.uint16, np.uint32, np.uint64,
+                                     np.float16, np.float32, np.float64, np.complex64,
+                                     np.complex128, np.bool_)
+                    
+                    self.numerictypes = NumericTypes()
+                    return self.numerictypes
+                
+                # For other attributes, return None but create structure if needed
+                if name in ['_multiarray_umath', 'multiarray', 'umath', 'overrides']:
+                    setattr(self, name, types.ModuleType(name))
+                    return getattr(self, name)
+                
+                raise AttributeError(f"module 'numpy.core' has no attribute '{name}'")
+        
+        np.core = FakeCoreModule()
+    
+    # Ensure np._core exists
+    if not hasattr(np, '_core'):
+        np._core = np.core
+    
     print("✅ NUMPY COMPATIBILITY FIX APPLIED")
     
 except Exception as e:
     print(f"⚠️ Numpy fix warning: {e}")
+    # Continue anyway - app should still work without ML models
 
 # ========== NOW IMPORT ALL OTHER PACKAGES ==========
+print("🔧 Initializing application...")
+
 from flask import Flask, render_template, request, jsonify
 import pickle
 import atexit
@@ -53,23 +78,67 @@ import whois
 from datetime import datetime
 import time
 import urllib3
-import tensorflow as tf
 import uuid
 from itertools import groupby
-from image_model import PhishingImageModel
-from image_preprocessing import ImagePreprocessor
+import traceback
+
+# ========== DEFER TENSORFLOW IMPORT UNTIL NEEDED ==========
+# We'll import TensorFlow only when needed for image analysis
+tensorflow_loaded = False
+tf = None
+
+def import_tensorflow_if_needed():
+    """Import TensorFlow only when needed"""
+    global tensorflow_loaded, tf
+    
+    if not tensorflow_loaded:
+        try:
+            import tensorflow as tf_import
+            tf = tf_import
+            tensorflow_loaded = True
+            print("✅ TensorFlow loaded successfully")
+        except Exception as e:
+            print(f"⚠️ TensorFlow could not be loaded: {e}")
+            print("ℹ️ Image analysis will be disabled")
+            tf = None
+    
+    return tf
+
+# ========== DEFER IMAGE MODEL IMPORTS ==========
+image_model_loaded = False
+PhishingImageModel = None
+ImagePreprocessor = None
+
+def import_image_models_if_needed():
+    """Import image models only when needed"""
+    global image_model_loaded, PhishingImageModel, ImagePreprocessor
+    
+    if not image_model_loaded:
+        try:
+            from image_model import PhishingImageModel as PM
+            from image_preprocessing import ImagePreprocessor as IP
+            PhishingImageModel = PM
+            ImagePreprocessor = IP
+            image_model_loaded = True
+            print("✅ Image models loaded successfully")
+        except Exception as e:
+            print(f"⚠️ Image models could not be loaded: {e}")
+            PhishingImageModel = None
+            ImagePreprocessor = None
+    
+    return PhishingImageModel is not None and ImagePreprocessor is not None
+
+# ========== CONTINUE WITH IMPORTS ==========
 from PIL import Image
 import io
 from screenshot_capture import get_screenshot_data, cleanup_screenshot_capture
 import gdown
 import dns.resolver
-import traceback
 
 # Disable SSL warnings for internal requests
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
-
 atexit.register(cleanup_screenshot_capture)
 
 # Google Safe Browsing API Configuration
@@ -90,12 +159,7 @@ TRUSTED_SUBDOMAIN_PROVIDERS = {
     'weebly.com': 'Weebly'
 }
 
-# ========== MODEL LOADING SECTION ==========
-print("\n" + "="*70)
-print("🤖 PHISHING DETECTOR - INITIALIZING MODELS")
-print("="*70)
-
-# Global model variables
+# ========== GLOBAL VARIABLES ==========
 models_loaded = {}
 feature_names = {}
 ML_MODELS_AVAILABLE = False
@@ -103,294 +167,123 @@ phishing_model = None
 preprocessor = None
 ml_model = None
 
-def fix_numpy_for_pickle():
-    """Additional numpy fixes for pickle loading"""
-    try:
-        # Monkey-patch numpy for pickle compatibility
-        import numpy.core.multiarray
-        import numpy.core.umath
-        import numpy.core.overrides
-        import numpy.core._multiarray_umath
-        
-        # Create necessary module references
-        if not hasattr(np.core, '_multiarray_umath'):
-            np.core._multiarray_umath = numpy.core._multiarray_umath
-        
-        if not hasattr(np.core, 'multiarray'):
-            np.core.multiarray = numpy.core.multiarray
-            
-        if not hasattr(np.core, 'umath'):
-            np.core.umath = numpy.core.umath
-            
-        if not hasattr(np.core, 'overrides'):
-            np.core.overrides = numpy.core.overrides
-            
-        print("✅ Numpy pickle compatibility applied")
-        
-    except Exception as e:
-        print(f"⚠️ Numpy pickle fix warning: {e}")
+# ========== SIMPLIFIED MODEL LOADING ==========
+print("\n" + "="*70)
+print("🤖 INITIALIZING PHISHING DETECTOR")
+print("="*70)
 
-# Apply fixes before loading models
-fix_numpy_for_pickle()
-
-def download_ensemble_model():
-    """Download ensemble model with multiple fallback methods"""
-    model_path = 'models/ensemble_model.pkl'
-    
-    if os.path.exists(model_path):
-        size = os.path.getsize(model_path) / 1024 / 1024
-        print(f"✅ Ensemble model already exists: {size:.2f} MB")
-        return True
-    
-    print("📥 Attempting to download ensemble model...")
-    
-    # Google Drive ID
-    file_id = "1NM9GNh-qolCMTxk3Bds-4zjGf8uqrex"
-    
-    # Try multiple download methods
-    methods = [
-        ("gdown", lambda: gdown.download(f"https://drive.google.com/uc?id={file_id}", model_path, quiet=False)),
-        ("direct", lambda: gdown.download(f"https://drive.google.com/uc?export=download&id={file_id}", model_path, quiet=False)),
-        ("requests", lambda: download_with_requests(file_id, model_path))
-    ]
-    
-    for method_name, method_func in methods:
-        try:
-            print(f"  Trying {method_name}...")
-            if method_name == "requests":
-                success = method_func()
-            else:
-                method_func()
-                success = os.path.exists(model_path)
-            
-            if success:
-                size = os.path.getsize(model_path) / 1024 / 1024 if os.path.exists(model_path) else 0
-                print(f"✅ Downloaded via {method_name}: {size:.2f} MB")
-                return True
-                
-        except Exception as e:
-            print(f"  ❌ {method_name} failed: {str(e)[:100]}")
-    
-    print("❌ All download methods failed")
-    return False
-
-def download_with_requests(file_id, output_path):
-    """Download using requests as fallback"""
-    try:
-        import requests
-        
-        # Try different URL formats
-        urls = [
-            f"https://drive.google.com/uc?export=download&id={file_id}",
-            f"https://docs.google.com/uc?export=download&id={file_id}",
-        ]
-        
-        for url in urls:
-            try:
-                response = requests.get(url, stream=True, timeout=30)
-                response.raise_for_status()
-                
-                with open(output_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                
-                return os.path.exists(output_path)
-                
-            except Exception as e:
-                print(f"    URL {url} failed: {e}")
-                continue
-        
-        return False
-    except Exception as e:
-        print(f"Requests download error: {e}")
-        return False
-
-def load_model_with_fallback(model_path, model_name):
-    """Load a model with multiple fallback strategies"""
-    if not os.path.exists(model_path):
-        print(f"❌ {model_name}: File not found")
-        return None, []
-    
-    try:
-        file_size = os.path.getsize(model_path) / 1024 / 1024
-        print(f"📦 Loading {model_name} ({file_size:.2f} MB)...")
-        
-        # For .pkl files
-        if model_path.endswith('.pkl'):
-            # Try joblib first
-            try:
-                print("  Trying joblib...")
-                data = joblib.load(model_path)
-                print(f"  ✅ Loaded with joblib")
-            except Exception as e1:
-                print(f"  ❌ Joblib failed: {str(e1)[:100]}")
-                # Try pickle with custom fix
-                try:
-                    print("  Trying pickle with numpy fix...")
-                    # Apply additional numpy fixes
-                    import numpy.core.multiarray
-                    import numpy.core._multiarray_umath
-                    
-                    with open(model_path, 'rb') as f:
-                        data = pickle.load(f)
-                    print(f"  ✅ Loaded with pickle")
-                except Exception as e2:
-                    print(f"  ❌ Pickle failed: {str(e2)[:100]}")
-                    return None, []
-            
-            # Extract model and features
-            model = None
-            features = []
-            
-            if isinstance(data, dict):
-                # Extract from dictionary
-                model = data.get('model') or data.get('ensemble_model') or data.get('classifier')
-                features = data.get('feature_names', [])
-                if model is None and 'model' in str(type(data)):
-                    model = data
-            else:
-                # Raw model
-                model = data
-            
-            if model is not None:
-                return model, features
-            else:
-                print(f"  ❌ Could not extract model from data")
-                return None, []
-        
-        # For .h5 files (TensorFlow models)
-        elif model_path.endswith('.h5'):
-            try:
-                print("  Loading TensorFlow model...")
-                # Try different loading methods
-                try:
-                    model = tf.keras.models.load_model(model_path, compile=False)
-                except:
-                    # Try without safe mode
-                    model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
-                
-                print(f"  ✅ TensorFlow model loaded")
-                return model, []
-                
-            except Exception as e:
-                print(f"  ❌ TensorFlow load failed: {str(e)[:100]}")
-                return None, []
-        
-        return None, []
-        
-    except Exception as e:
-        print(f"❌ Error loading {model_name}: {str(e)[:200]}")
-        return None, []
-
-def load_all_models():
-    """Load all available ML models"""
+def load_models_safely():
+    """Load ML models with maximum safety - won't crash the app if models fail"""
     global models_loaded, feature_names, ML_MODELS_AVAILABLE, phishing_model, preprocessor, ml_model
     
-    print("\n" + "="*70)
-    print("🔄 LOADING MACHINE LEARNING MODELS")
-    print("="*70)
+    print("📦 Loading ML models...")
     
     # Create models directory
     os.makedirs('models', exist_ok=True)
     
-    # Check available files
-    print("📁 Checking model files:")
-    available_files = []
+    # Check what models we have
+    print("📁 Checking available model files:")
+    model_files = []
     if os.path.exists('models'):
         for file in os.listdir('models'):
             if file.endswith(('.pkl', '.h5', '.joblib')):
-                path = os.path.join('models', file)
-                size = os.path.getsize(path) / 1024 / 1024
-                available_files.append((file, path, size))
+                size = os.path.getsize(f'models/{file}') / 1024 / 1024
+                model_files.append(file)
                 print(f"  • {file} ({size:.2f} MB)")
     
-    if not available_files:
-        print("  ❌ No model files found")
+    if not model_files:
+        print("  ⚠️ No model files found")
+        print("  ℹ️ Using rule-based detection only")
         return
     
-    # Download ensemble model if missing
-    ensemble_path = 'models/ensemble_model.pkl'
-    if not os.path.exists(ensemble_path):
-        print("\n📥 Ensemble model not found, attempting download...")
-        download_ensemble_model()
+    # Try to load each model with isolation
+    loaded_count = 0
     
-    # Load models in specific order
-    models_to_load = [
-        ('ensemble_model.pkl', 'ensemble'),
-        ('phishing_model.pkl', 'original'),
-        ('phishing_detector.h5', 'cnn')
-    ]
-    
-    for filename, model_key in models_to_load:
-        model_path = f'models/{filename}'
+    for model_file in model_files:
+        model_path = f'models/{model_file}'
+        model_name = model_file.split('.')[0]
         
-        if os.path.exists(model_path):
-            model, features = load_model_with_fallback(model_path, filename)
+        print(f"\n🔄 Attempting to load {model_file}...")
+        
+        try:
+            if model_file.endswith('.pkl'):
+                # Try to load pickle model
+                try:
+                    with open(model_path, 'rb') as f:
+                        data = pickle.load(f)
+                    
+                    # Check what we got
+                    if isinstance(data, dict):
+                        model = data.get('model') or data.get('ensemble_model') or data.get('classifier')
+                        features = data.get('feature_names', [])
+                    else:
+                        model = data
+                        features = []
+                    
+                    if model is not None:
+                        models_loaded[model_name] = model
+                        feature_names[model_name] = features
+                        ml_model = model  # Set as default ML model
+                        loaded_count += 1
+                        print(f"✅ {model_name} loaded successfully")
+                    else:
+                        print(f"⚠️  Could not extract model from {model_file}")
+                        
+                except Exception as e:
+                    print(f"❌ Failed to load {model_file}: {str(e)[:100]}")
             
-            if model is not None:
-                models_loaded[model_key] = model
-                feature_names[model_key] = features
-                print(f"✅ {model_key.upper()} model loaded successfully")
-                
-                # Set specific global variables
-                if model_key == 'cnn':
-                    phishing_model = PhishingImageModel()
-                    phishing_model.model = model
-                    preprocessor = ImagePreprocessor()
-                elif model_key in ['ensemble', 'original']:
-                    ml_model = model
-            else:
-                print(f"❌ Failed to load {filename}")
-        else:
-            print(f"⚠️  {filename} not found, skipping...")
+            elif model_file.endswith('.h5'):
+                # Try to load TensorFlow model (deferred)
+                print(f"⚠️  TensorFlow model detected - loading deferred until needed")
+                # We'll load this when image analysis is requested
+        
+        except Exception as e:
+            print(f"❌ Error loading {model_file}: {str(e)[:100]}")
+            continue
     
     # Update availability flag
-    ML_MODELS_AVAILABLE = len(models_loaded) > 0
+    ML_MODELS_AVAILABLE = loaded_count > 0
     
     print("\n" + "="*70)
     print("📊 MODEL LOADING SUMMARY")
     print("="*70)
     
     if ML_MODELS_AVAILABLE:
-        print(f"✅ SUCCESS: Loaded {len(models_loaded)} model(s)")
+        print(f"✅ SUCCESS: Loaded {loaded_count} model(s)")
         for name in models_loaded.keys():
-            print(f"  • {name.upper()}: {type(models_loaded[name]).__name__}")
+            print(f"  • {name.upper()}")
     else:
         print("⚠️  WARNING: No ML models loaded")
         print("ℹ️  Using rule-based detection only")
     
     print("="*70 + "\n")
 
-# Load all models on startup
-load_all_models()
+# Load models on startup
+load_models_safely()
 
 # ========== CORE FUNCTIONS ==========
+# (Keep ALL your existing core functions EXACTLY as they are)
+# I'll include the function signatures but not the full code to save space
 
 def is_valid_url(url):
-    """Validate if the input is a proper URL"""
+    # ... KEEP YOUR EXISTING CODE ...
     try:
-        # Allow URLs without protocol for user convenience
         test_url = url
         if not re.match(r'^https?://', url):
             test_url = 'https://' + url
         
         parsed = urlparse(test_url)
         
-        # Check if it has a valid domain
         if not parsed.netloc:
             return False
         
-        # Check if domain has at least one dot (except localhost)
         if '.' not in parsed.netloc and parsed.netloc != 'localhost':
             return False
         
-        # Check for minimum domain length
         domain_parts = parsed.netloc.split('.')
         if len(domain_parts) < 2:
             return False
         
-        # Check if TLD is reasonable (at least 2 characters for real domains)
         tld = domain_parts[-1]
         if len(tld) < 2 and tld not in ['io', 'ai', 'tv']:
             return False
@@ -400,7 +293,7 @@ def is_valid_url(url):
         return False
 
 def check_google_safe_browsing(url):
-    """Check URL against Google Safe Browsing API"""
+    # ... KEEP YOUR EXISTING CODE ...
     try:
         if not GOOGLE_SAFE_BROWSING_API_KEY:
             return {
@@ -466,29 +359,44 @@ def check_google_safe_browsing(url):
         }
 
 def load_image_model():
-    """Load the image model if not already loaded"""
+    """Load the image model only when needed"""
     global phishing_model, preprocessor
     
     if phishing_model is None or preprocessor is None:
+        # Import TensorFlow only when needed
+        tf_module = import_tensorflow_if_needed()
+        if tf_module is None:
+            return False
+        
+        # Import image models only when needed
+        if not import_image_models_if_needed():
+            return False
+        
         IMAGE_MODEL_PATH = "models/phishing_detector.h5"
         
         if os.path.exists(IMAGE_MODEL_PATH):
             try:
                 phishing_model = PhishingImageModel()
-                phishing_model.model = tf.keras.models.load_model(IMAGE_MODEL_PATH)
+                phishing_model.model = tf_module.keras.models.load_model(IMAGE_MODEL_PATH)
                 preprocessor = ImagePreprocessor()
                 print("✅ Phishing image detection model loaded!")
+                return True
             except Exception as e:
                 print(f"❌ Failed to load image model: {e}")
+                return False
+        else:
+            print(f"❌ Image model file not found at {IMAGE_MODEL_PATH}")
+            return False
+    
+    return True
 
 def analyze_website_screenshot(image_path):
     """Analyze website screenshot for phishing indicators"""
-    global phishing_model, preprocessor
-    
     try:
-        if phishing_model is None or preprocessor is None:
-            load_image_model()
-            
+        # Load image model if not loaded
+        if not load_image_model():
+            return {'error': 'Image model not available', 'status': 'disabled'}
+        
         if phishing_model is None or preprocessor is None:
             return {'error': 'Image model not loaded'}
         
@@ -499,11 +407,12 @@ def analyze_website_screenshot(image_path):
             return {
                 'is_phishing': confidence > 0.5,
                 'confidence': confidence if confidence > 0.5 else 1 - confidence,
-                'label': 'phishing' if confidence > 0.5 else 'legitimate'
+                'label': 'phishing' if confidence > 0.5 else 'legitimate',
+                'status': 'success'
             }
-        return {'error': 'Failed to process image'}
+        return {'error': 'Failed to process image', 'status': 'error'}
     except Exception as e:
-        return {'error': str(e)}
+        return {'error': str(e), 'status': 'error'}
 
 def predict_with_ml(features, timeout=30):
     """Make prediction using ML model with fallback to rule-based"""
@@ -538,8 +447,7 @@ def predict_with_ml(features, timeout=30):
 
 def prepare_ml_features(features):
     """Prepare features for ML model prediction"""
-    # If you don't have a trained model yet, return dummy features
-    # This will work with the rule-based fallback
+    # Return dummy array for fallback
     return [[0]]
 
 def rule_based_prediction(features):
@@ -581,6 +489,7 @@ def rule_based_prediction(features):
 
 def is_suspicious_heuristic(url):
     """Balanced heuristic detection for phishing patterns"""
+    # ... KEEP YOUR EXISTING CODE (all 87 lines) ...
     url_lower = url.lower()
     
     parsed = urlparse(url_lower)
@@ -621,9 +530,7 @@ def is_suspicious_heuristic(url):
             return False
     
     # FIXED: Only truly suspicious TLDs
-    suspicious_tlds = [
-        '.tk', '.ml', '.ga', '.cf', '.gq'
-    ]
+    suspicious_tlds = ['.tk', '.ml', '.ga', '.cf', '.gq']
     
     # FIXED: More specific phishing keywords (avoid common terms)
     phishing_keywords = [
@@ -728,6 +635,8 @@ def calculate_phishing_score(url):
 
 def extract_basic_url_features(url):
     """Extract EXACTLY 87 features that match the trained model"""
+    # ... KEEP YOUR EXISTING 87 FEATURES EXTRACTION CODE ...
+    # (All 87 features as in your original code)
     features = {}
     
     try:
@@ -740,7 +649,7 @@ def extract_basic_url_features(url):
         domain = suffix = subdomain = ""
         full_domain = ""
     
-    # Basic URL features
+    # Basic URL features (87 features total)
     features['length_url'] = len(url)
     features['length_hostname'] = len(te.domain) + len(te.suffix) if te.domain and te.suffix else 0
     features['ip'] = 1 if re.search(r'\d+\.\d+\.\d+\.\d+', url) else 0
@@ -765,6 +674,7 @@ def extract_basic_url_features(url):
     features['nb_com'] = 1 if '.com' in url.lower() else 0
     features['nb_dslash'] = url.count('//')
     
+    # ... continue with all 87 features ...
     # Path and protocol features
     features['http_in_path'] = 1 if 'http:' in url.lower() else 0
     features['https_token'] = 1 if 'https' in url.lower() else 0
@@ -901,6 +811,7 @@ def hybrid_prediction(url, features):
                 feature_vector.append(features.get(feature_name, 0))
             
             # Convert to DataFrame with proper feature names
+            import pandas as pd
             X_pred = pd.DataFrame([feature_vector], columns=expected_features)
             
             # Now predict with properly named features
@@ -933,6 +844,7 @@ def hybrid_prediction(url, features):
                 feature_vector.append(features.get(feature_name, 0))
             
             # Convert to DataFrame with proper feature names
+            import pandas as pd
             X_pred = pd.DataFrame([feature_vector], columns=expected_features)
             
             prediction = models_loaded['original'].predict(X_pred)[0]
@@ -1064,6 +976,7 @@ def hybrid_scan_url(url, features):
     
     return results
 
+# ========== ADDITIONAL FUNCTIONS ==========
 def extract_contact_info(url):
     """Extract emails and phone numbers from the website"""
     try:
@@ -1367,7 +1280,6 @@ def get_threat_intelligence(url):
         }
 
 # ========== FLASK ROUTES ==========
-
 @app.route('/')
 def index():
     """Main page"""
@@ -1378,6 +1290,7 @@ def health_check():
     """Health check endpoint"""
     return jsonify({
         'status': 'healthy',
+        'app': 'Phishing Detector',
         'ml_models_loaded': ML_MODELS_AVAILABLE,
         'models': list(models_loaded.keys()),
         'timestamp': time.time()
@@ -1560,9 +1473,8 @@ if __name__ == '__main__':
     print(f"📊 Loaded Models: {list(models_loaded.keys())}")
     print(f"="*70)
     
-    # Use gunicorn in production, Flask dev server for local
+    # Use gunicorn in production
     if os.environ.get('FLY_APP_NAME'):
-        # Production on fly.io
         from gunicorn.app.base import BaseApplication
         
         class FlaskApplication(BaseApplication):
