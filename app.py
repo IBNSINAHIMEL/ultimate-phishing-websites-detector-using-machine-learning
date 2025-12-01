@@ -1508,14 +1508,14 @@ def scan_url():
 # [KEEP YOUR OTHER ROUTES - analyze-image, api/scan, serve_screenshot]
 
 if __name__ == '__main__':
-    print("🚀 Starting Flask Phishing Detector Server...")
-    print("📍 Local: http://127.0.0.1:5000")
-    try:
-        app.run(debug=True, host='0.0.0.0', port=5000, use_reloader=False)
-    except Exception as e:
-        print(f"❌ Error starting server: {e}")
-        app.run(debug=True, host='0.0.0.0', port=5001, use_reloader=False)
-
+    import os
+    port = int(os.environ.get('PORT', 5000))  # Get PORT from env or default to 5000
+    
+    print(f"🚀 Starting Flask Phishing Detector Server...")
+    print(f"📍 Local: http://127.0.0.1:{port}")
+    print(f"🌐 Network: http://0.0.0.0:{port}")
+    
+    app.run(debug=False, host='0.0.0.0', port=port, use_reloader=False)
 
 
 
