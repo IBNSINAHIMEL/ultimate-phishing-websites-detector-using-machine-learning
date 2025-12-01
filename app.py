@@ -1267,7 +1267,8 @@ def check_google_safe_browsing_improved(url):
 def download_large_model():
     """Download large ML model from Google Drive if not exists"""
     model_path = 'models/ensemble_model.pkl'  # Adjust filename as needed
-    google_drive_url = "https://drive.google.com/uc?id=1NM9GNh-qolCMTxk3B3ds-4zjGf8uqrex"
+    google_drive_url = "https://drive.google.com/uc?export=download&id=1NM9GNh-qolCMTxk3B3ds-4zjGf8uqrex"
+
     
     if not os.path.exists(model_path):
         print("📥 Downloading large ML model from Google Drive...")
@@ -1517,6 +1518,7 @@ if __name__ == '__main__':
     print(f"🌐 Network: http://0.0.0.0:{port}")
     
     app.run(debug=False, host='0.0.0.0', port=port, use_reloader=False)
+
 
 
 
