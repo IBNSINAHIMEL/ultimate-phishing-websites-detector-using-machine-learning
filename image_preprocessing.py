@@ -1,11 +1,8 @@
-# image_preprocessing.py
 import os
-import cv2
 import numpy as np
-from PIL import Image  # ← ADD THIS IMPORT
+from PIL import Image
 import tensorflow as tf
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
-import matplotlib.pyplot as plt
 
 class ImagePreprocessor:
     def __init__(self, target_size=(224, 224)):
@@ -14,7 +11,7 @@ class ImagePreprocessor:
     def load_and_preprocess_image(self, image_path):
         """Load and preprocess a single image of any size"""
         try:
-            # Load image (can be any size)
+            # Load image using Pillow (no OpenCV needed)
             image = Image.open(image_path)
 
             # Convert to RGB if necessary
