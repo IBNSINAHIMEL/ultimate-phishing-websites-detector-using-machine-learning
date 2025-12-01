@@ -1425,8 +1425,7 @@ def index():
 @app.route('/scan', methods=['POST'])
 def scan_url():
     """Scan URL - no authentication required"""
-    if not models_loaded:
-      print("⚠️ WARNING: No ML models loaded. Using rule-based fallback detection.")
+
 
     data = request.get_json()
     url_input = data.get('url', '').strip()
@@ -1600,6 +1599,7 @@ if __name__ == '__main__':
     print(f"🌐 Network: http://0.0.0.0:{port}")
     
     app.run(debug=False, host='0.0.0.0', port=port, use_reloader=False)
+
 
 
 
