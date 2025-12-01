@@ -6,15 +6,13 @@ gunicorn==21.2.0
 pandas==2.2.2
 numpy==1.24.3
 scikit-learn==1.5.2
-tensorflow==2.13.0
+tensorflow==2.13.0  # Required for CNN
 xgboost==2.0.3
 lightgbm==4.3.0
 
-# Computer Vision & Image Processing
-
-Pillow==10.0.0
-matplotlib==3.7.2
-seaborn==0.12.2
+# Image Processing for CNN
+opencv-python-headless==4.8.1.78  # ✅ HEADLESS version (no GUI)
+Pillow==10.0.0  # ✅ Required for image loading
 
 # Network & Security
 requests==2.31.0
