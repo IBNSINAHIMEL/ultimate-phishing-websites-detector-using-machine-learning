@@ -1,5 +1,3 @@
-# ========== CRITICAL: NUMPY COMPATIBILITY FIX ==========
-# This MUST be the FIRST thing in the file
 import sys
 import os
 
@@ -10,14 +8,9 @@ os.environ['NUMPY_DEPRECATED_WARNINGS'] = '0'
 import numpy as np
 
 # CRITICAL FIX for Python 3.11 + numpy 1.24.3 + TensorFlow 2.13.0
-# Create the missing module structure that TensorFlow expects
 try:
-    # Check if np.core exists
     if not hasattr(np, 'core'):
-        # Create a minimal core module structure
         import types
-        
-        # Create a fake core module
         class FakeCoreModule(types.ModuleType):
             def __init__(self):
                 super().__init__('core')
@@ -28,33 +21,24 @@ try:
                 self.overrides = None
             
             def __getattr__(self, name):
-                # Return appropriate fallback
                 if name == 'numerictypes':
-                    # Create numerictypes with ScalarType
                     class NumericTypes:
                         ScalarType = (int, float, complex, np.int8, np.int16, np.int32, 
                                      np.int64, np.uint8, np.uint16, np.uint32, np.uint64,
                                      np.float16, np.float32, np.float64, np.complex64,
                                      np.complex128, np.bool_)
-                    
                     self.numerictypes = NumericTypes()
                     return self.numerictypes
                 
-                # For other attributes, return None but create structure if needed
                 if name in ['_multiarray_umath', 'multiarray', 'umath', 'overrides']:
                     setattr(self, name, types.ModuleType(name))
                     return getattr(self, name)
-                
                 raise AttributeError(f"module 'numpy.core' has no attribute '{name}'")
-        
         np.core = FakeCoreModule()
     
-    # Ensure np._core exists
     if not hasattr(np, '_core'):
         np._core = np.core
-    
     print("✅ NUMPY COMPATIBILITY FIX APPLIED")
-    
 except Exception as e:
     print(f"⚠️ Numpy fix warning: {e}")
     # Continue anyway - app should still work without ML models
@@ -168,21 +152,65 @@ preprocessor = None
 ml_model = None
 
 # ========== SIMPLIFIED MODEL LOADING ==========
-print("\n" + "="*70)
-print("🤖 INITIALIZING PHISHING DETECTOR")
-print("="*70)
 
+
+# ========== CONTINUE WITH IMPORTS ==========
+from PIL import Image
+import io
+from screenshot_capture import get_screenshot_data, cleanup_screenshot_capture
+import gdown  # Make sure this import is present
+import dns.resolver
+
+# Disable SSL warnings for internal requests
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+def download_missing_models():
+    """Downloads large models from Google Drive if missing"""
+    print("\n" + "="*50)
+    print("📥 CHECKING FOR MISSING MODELS")
+    print("="*50)
+    
+    os.makedirs('models', exist_ok=True)
+
+    # Dictionary of models to check: {'filename': 'google_drive_id'}
+    required_models = {
+        'ensemble_model.pkl': '1NM9GNh-qolCMTxk3B3ds-4zjGf8uqrex'
+    }
+
+    for filename, file_id in required_models.items():
+        output_path = os.path.join('models', filename)
+        
+        if not os.path.exists(output_path):
+            print(f"⚠️ {filename} not found. Downloading...")
+            try:
+                url = f'https://drive.google.com/uc?id={file_id}'
+                gdown.download(url, output_path, quiet=False, fuzzy=True)
+                
+                if os.path.exists(output_path):
+                    size = os.path.getsize(output_path) / (1024 * 1024)
+                    print(f"✅ {filename} downloaded! ({size:.2f} MB)")
+                else:
+                    print(f"❌ Failed to download {filename}")
+            except Exception as e:
+                print(f"❌ Error downloading {filename}: {e}")
+        else:
+            print(f"✅ {filename} already exists.")
+            
+    print("="*50 + "\n")
+
+# ========== MODEL LOADING LOGIC ==========
 def load_models_safely():
-    """Load ML models with maximum safety - won't crash the app if models fail"""
+    """Load ML models with maximum safety"""
     global models_loaded, feature_names, ML_MODELS_AVAILABLE, phishing_model, preprocessor, ml_model
     
+    print("\n" + "="*70)
+    print("🤖 INITIALIZING PHISHING DETECTOR")
+    print("="*70)
+    
+    # 1. RUN DOWNLOADER FIRST
+    download_missing_models()
+
     print("📦 Loading ML models...")
     
-    # Create models directory
-    os.makedirs('models', exist_ok=True)
-    
-    # Check what models we have
-    print("📁 Checking available model files:")
     model_files = []
     if os.path.exists('models'):
         for file in os.listdir('models'):
@@ -192,27 +220,23 @@ def load_models_safely():
                 print(f"  • {file} ({size:.2f} MB)")
     
     if not model_files:
-        print("  ⚠️ No model files found")
-        print("  ℹ️ Using rule-based detection only")
+        print("  ⚠️ No model files found - using rule-based only")
         return
-    
-    # Try to load each model with isolation
+
     loaded_count = 0
     
     for model_file in model_files:
         model_path = f'models/{model_file}'
         model_name = model_file.split('.')[0]
         
-        print(f"\n🔄 Attempting to load {model_file}...")
-        
         try:
             if model_file.endswith('.pkl'):
-                # Try to load pickle model
-                try:
-                    with open(model_path, 'rb') as f:
-                        data = pickle.load(f)
+                # Handle Pickle Models (Numeric)
+                print(f"🔄 Loading {model_file}...")
+                with open(model_path, 'rb') as f:
+                    data = pickle.load(f)
                     
-                    # Check what we got
+                    # Extract model and features
                     if isinstance(data, dict):
                         model = data.get('model') or data.get('ensemble_model') or data.get('classifier')
                         features = data.get('feature_names', [])
@@ -223,47 +247,35 @@ def load_models_safely():
                     if model is not None:
                         models_loaded[model_name] = model
                         feature_names[model_name] = features
-                        ml_model = model  # Set as default ML model
+                        
+                        # Prioritize ensemble_model as main model if found
+                        if 'ensemble' in model_name:
+                            ml_model = model
+                        elif ml_model is None:
+                            ml_model = model
+                            
                         loaded_count += 1
                         print(f"✅ {model_name} loaded successfully")
                     else:
-                        print(f"⚠️  Could not extract model from {model_file}")
-                        
-                except Exception as e:
-                    print(f"❌ Failed to load {model_file}: {str(e)[:100]}")
-            
+                        print(f"⚠️ Could not extract model object from {model_file}")
+
             elif model_file.endswith('.h5'):
-                # Try to load TensorFlow model (deferred)
-                print(f"⚠️  TensorFlow model detected - loading deferred until needed")
-                # We'll load this when image analysis is requested
-        
+                # Handle H5 Models (Image - Deferred)
+                print(f"ℹ️ {model_file} detected - loading deferred until needed")
+
         except Exception as e:
-            print(f"❌ Error loading {model_file}: {str(e)[:100]}")
-            continue
-    
-    # Update availability flag
+            print(f"❌ Failed to load {model_file}: {str(e)[:100]}")
+
     ML_MODELS_AVAILABLE = loaded_count > 0
-    
-    print("\n" + "="*70)
-    print("📊 MODEL LOADING SUMMARY")
-    print("="*70)
     
     if ML_MODELS_AVAILABLE:
         print(f"✅ SUCCESS: Loaded {loaded_count} model(s)")
-        for name in models_loaded.keys():
-            print(f"  • {name.upper()}")
     else:
-        print("⚠️  WARNING: No ML models loaded")
-        print("ℹ️  Using rule-based detection only")
-    
-    print("="*70 + "\n")
+        print("⚠️ WARNING: No ML models loaded")
 
-# Load models on startup
+# ========== RUN LOADING SEQUENCE ==========
 load_models_safely()
 
-# ========== CORE FUNCTIONS ==========
-# (Keep ALL your existing core functions EXACTLY as they are)
-# I'll include the function signatures but not the full code to save space
 
 def is_valid_url(url):
     # ... KEEP YOUR EXISTING CODE ...
@@ -1502,3 +1514,4 @@ if __name__ == '__main__':
     else:
         # Local development
         app.run(debug=False, host='0.0.0.0', port=port, use_reloader=False)
+
