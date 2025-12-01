@@ -10,9 +10,8 @@ tensorflow==2.13.0  # Required for CNN
 xgboost==2.0.3
 lightgbm==4.3.0
 
-# Image Processing for CNN
-opencv-python-headless==4.8.1.78  # ✅ HEADLESS version (no GUI)
-Pillow==10.0.0  # ✅ Required for image loading
+# Image Processing (Pillow only, no OpenCV)
+Pillow==10.0.0
 
 # Network & Security
 requests==2.31.0
@@ -25,4 +24,3 @@ urllib3==2.0.4
 # Utilities
 joblib==1.4.2
 gdown==4.7.1
-
