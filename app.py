@@ -1271,109 +1271,151 @@ def check_google_safe_browsing_improved(url):
     if not result.get('success'):
         return {'status': 'API Error', 'error': result.get('error')}
     return {'status': 'Threat' if result['is_threat'] else 'Clean'}    
-def download_large_model():
-    """Download large ML model from Google Drive if not exists"""
-    model_path = 'models/ensemble_model.pkl'  # Adjust filename as needed
-    google_drive_url = "https://drive.google.com/uc?export=download&id=1NM9GNh-qolCMTxk3B3ds-4zjGf8uqrex"
-
-    
-    if not os.path.exists(model_path):
-        print("📥 Downloading large ML model from Google Drive...")
-        try:
-            # Create models directory if it doesn't exist
-            os.makedirs('models', exist_ok=True)
-            
-            # Download using gdown (more reliable for Google Drive)
-            gdown.download(google_drive_url, model_path, quiet=False)
-            print("✅ Large model downloaded successfully!")
-            
-        except Exception as e:
-            print(f"❌ Failed to download model: {e}")
-            # Fallback to requests
-            try:
-                response = requests.get(f"https://drive.google.com/uc?export=download&id=1NM9GNh-qolCMTxk3Bds-4zjGf8uqrex")
-                with open(model_path, 'wb') as f:
-                    f.write(response.content)
-                print("✅ Large model downloaded via fallback method!")
-            except Exception as e2:
-                print(f"❌ Fallback download also failed: {e2}")
-    else:
-        print("✅ Large model already exists!")
-
-# Call this function before loading models
-download_large_model()    
-# Load both models
+# ========== MODEL LOADING ==========
 import os
 import pickle
 import joblib
 import tensorflow as tf
-
-# Auto-detect CNN model file
-cnn_file = None
-for f in os.listdir("models"):
-    if f.endswith(".h5"):
-        cnn_file = f
-        break
-
-MODEL_PATH_ORIGINAL = "models/phishing_model.pkl"
-MODEL_PATH_ENSEMBLE = "models/ensemble_model.pkl"
-MODEL_PATH_CNN = f"models/{cnn_file}" if cnn_file else None
+import gdown
 
 models_loaded = {}
 feature_names = {}
 threat_intelligence = {}
 
-print("\n📌 Checking model files...\n")
-print("Original:", os.path.abspath(MODEL_PATH_ORIGINAL))
-print("Ensemble:", os.path.abspath(MODEL_PATH_ENSEMBLE))
-print("CNN path:", MODEL_PATH_CNN)
+print("\n" + "="*60)
+print("🤖 STARTING MODEL LOADING PROCESS")
+print("="*60)
 
+# Define model paths
+MODEL_PATHS = {
+    'original': "models/phishing_model.pkl",
+    'ensemble': "models/ensemble_model.pkl",
+    'cnn': "models/phishing_detector.h5"
+}
 
-# Load ORIGINAL MODEL
-if os.path.exists(MODEL_PATH_ORIGINAL):
+# Google Drive URLs (update with your actual IDs)
+GOOGLE_DRIVE_IDS = {
+    'ensemble': "1NM9GNh-qolCMTxk3Bds-4zjGf8uqrex"  # Your ensemble model
+    # Add IDs for other models if needed
+}
+
+# Create models directory
+os.makedirs('models', exist_ok=True)
+
+# ========== DOWNLOAD ENSEMBLE MODEL FROM GOOGLE DRIVE ==========
+def download_ensemble_model():
+    """Download ensemble model from Google Drive"""
+    ensemble_path = MODEL_PATHS['ensemble']
+    if not os.path.exists(ensemble_path):
+        print("📥 Downloading ensemble model from Google Drive...")
+        try:
+            url = f"https://drive.google.com/uc?id={GOOGLE_DRIVE_IDS['ensemble']}"
+            gdown.download(url, ensemble_path, quiet=False)
+            print(f"✅ Ensemble model downloaded: {ensemble_path}")
+            return True
+        except Exception as e:
+            print(f"❌ Failed to download ensemble model: {e}")
+            return False
+    else:
+        print(f"✅ Ensemble model already exists: {ensemble_path}")
+        return True
+
+# Download the ensemble model
+download_ensemble_model()
+
+# ========== LOAD ORIGINAL MODEL ==========
+print("\n🔍 Loading original model...")
+if os.path.exists(MODEL_PATHS['original']):
     try:
-        with open(MODEL_PATH_ORIGINAL, "rb") as f:
+        with open(MODEL_PATHS['original'], "rb") as f:
             data = pickle.load(f)
         models_loaded["original"] = data["model"]
         feature_names["original"] = data["feature_names"]
-        print("✅ Original model loaded")
+        print("✅ Original model loaded successfully")
     except Exception as e:
-        print("❌ Failed loading original model:", e)
+        print(f"❌ Failed to load original model: {e}")
+        models_loaded["original"] = None
 else:
-    print("❌ Original model file NOT FOUND")
+    print("❌ Original model file not found")
+    models_loaded["original"] = None
 
-
-# Load ENSEMBLE MODEL
-if os.path.exists(MODEL_PATH_ENSEMBLE):
+# ========== LOAD ENSEMBLE MODEL ==========
+print("\n🔍 Loading ensemble model...")
+if os.path.exists(MODEL_PATHS['ensemble']):
     try:
-        data = joblib.load(MODEL_PATH_ENSEMBLE)
-        models_loaded["ensemble"] = data["ensemble_model"]
-        feature_names["ensemble"] = data["feature_names"]
-        threat_intelligence = data.get("threat_intelligence", {})
-        print("✅ Ensemble model loaded")
+        # Try different loading methods
+        file_size = os.path.getsize(MODEL_PATHS['ensemble'])
+        print(f"📦 File size: {file_size / 1024 / 1024:.2f} MB")
+        
+        # Method 1: Try joblib first
+        try:
+            data = joblib.load(MODEL_PATHS['ensemble'])
+            models_loaded["ensemble"] = data["ensemble_model"]
+            feature_names["ensemble"] = data["feature_names"]
+            threat_intelligence = data.get("threat_intelligence", {})
+            print("✅ Ensemble model loaded with joblib")
+        except Exception as e1:
+            print(f"⚠️ Joblib failed: {e1}")
+            # Method 2: Try pickle as fallback
+            try:
+                with open(MODEL_PATHS['ensemble'], "rb") as f:
+                    data = pickle.load(f)
+                models_loaded["ensemble"] = data["ensemble_model"]
+                feature_names["ensemble"] = data["feature_names"]
+                threat_intelligence = data.get("threat_intelligence", {})
+                print("✅ Ensemble model loaded with pickle")
+            except Exception as e2:
+                print(f"❌ Pickle also failed: {e2}")
+                models_loaded["ensemble"] = None
+                
     except Exception as e:
-        print("❌ Failed loading ensemble model:", e)
+        print(f"❌ Failed to load ensemble model: {e}")
+        models_loaded["ensemble"] = None
 else:
-    print("❌ Ensemble model file NOT FOUND")
+    print("❌ Ensemble model file not found")
+    models_loaded["ensemble"] = None
 
-
-# Load CNN MODEL
-if MODEL_PATH_CNN and os.path.exists(MODEL_PATH_CNN):
+# ========== LOAD CNN MODEL ==========
+print("\n🖼️ Loading CNN model...")
+if os.path.exists(MODEL_PATHS['cnn']):
     try:
-        models_loaded["cnn"] = tf.keras.models.load_model(MODEL_PATH_CNN)
-        print("✅ CNN model loaded")
+        models_loaded["cnn"] = tf.keras.models.load_model(MODEL_PATHS['cnn'])
+        print("✅ CNN model loaded successfully")
     except Exception as e:
-        print("❌ Failed loading CNN model:", e)
+        print(f"❌ Failed to load CNN model: {e}")
+        models_loaded["cnn"] = None
 else:
-    print("❌ CNN model file NOT FOUND")
+    print("❌ CNN model file not found")
+    models_loaded["cnn"] = None
 
+# ========== FINAL STATUS CHECK ==========
+print("\n" + "="*60)
+print("📊 MODEL LOADING SUMMARY")
+print("="*60)
 
-# FINAL CHECK
-if not models_loaded:
-    print("\n🚨 ERROR: No models loaded at all!\n")
+# Count loaded models
+loaded_models = {k: v for k, v in models_loaded.items() if v is not None}
+failed_models = {k: v for k, v in models_loaded.items() if v is None}
+
+print(f"\n✅ LOADED MODELS ({len(loaded_models)}):")
+for name, model in loaded_models.items():
+    print(f"  • {name}: {type(model).__name__}")
+
+print(f"\n❌ FAILED MODELS ({len(failed_models)}):")
+for name in failed_models.keys():
+    print(f"  • {name}")
+
+# Set global availability flag
+ML_MODELS_AVAILABLE = len(loaded_models) > 0
+
+if ML_MODELS_AVAILABLE:
+    print(f"\n🎉 SUCCESS: {len(loaded_models)} model(s) loaded")
+    print("🔧 The application will use ML-based detection")
 else:
-    print("\n🎉 MODELS SUCCESSFULLY LOADED:", list(models_loaded.keys()), "\n")
+    print(f"\n⚠️ WARNING: No ML models loaded")
+    print("🔧 The application will use rule-based fallback detection")
 
+print("="*60 + "\n")
 # Add the missing index route
 @app.route('/')
 def index():
@@ -1384,9 +1426,7 @@ def index():
 def scan_url():
     """Scan URL - no authentication required"""
     if not models_loaded:
-        return jsonify({
-            'error': 'No models loaded. Please train the model first.'
-        }), 500
+      print("⚠️ WARNING: No ML models loaded. Using rule-based fallback detection.")
 
     data = request.get_json()
     url_input = data.get('url', '').strip()
@@ -1560,6 +1600,7 @@ if __name__ == '__main__':
     print(f"🌐 Network: http://0.0.0.0:{port}")
     
     app.run(debug=False, host='0.0.0.0', port=port, use_reloader=False)
+
 
 
 
