@@ -1,8 +1,46 @@
+# ========== NUMPY COMPATIBILITY FIX - MUST BE AT THE VERY TOP ==========
+import numpy as np
+import sys
+import os
+
+# CRITICAL FIX for Python 3.11 numpy compatibility
+try:
+    # Create the missing _core module reference for numpy 1.24.3
+    if not hasattr(np, '_core'):
+        try:
+            # Try to import numpy._core if available (numpy >= 1.25)
+            import numpy._core as _core
+            np._core = _core
+        except ImportError:
+            # For numpy 1.24.3, create the necessary structure
+            class DummyCore:
+                def __init__(self):
+                    self.multiarray = np
+                    self._multiarray_umath = np
+                    self.umath = np
+                    self.overrides = np
+                    self._dtype_meta = np
+                
+                def __getattr__(self, name):
+                    return getattr(np, name, None)
+            
+            np._core = DummyCore()
+            np.core = np._core
+        
+    # Also ensure np.core exists
+    if not hasattr(np, 'core'):
+        np.core = np
+        
+    print("✅ NUMPY COMPATIBILITY FIX APPLIED")
+    
+except Exception as e:
+    print(f"⚠️ Numpy fix warning: {e}")
+
+# ========== NOW IMPORT ALL OTHER PACKAGES ==========
 from flask import Flask, render_template, request, jsonify
 import pickle
 import atexit
 import joblib
-import os
 import pandas as pd
 import tldextract
 import re
@@ -16,18 +54,16 @@ from datetime import datetime
 import time
 import urllib3
 import tensorflow as tf
-import numpy as np
 import uuid
-from itertools import groupby  # Add this to your imports
+from itertools import groupby
 from image_model import PhishingImageModel
 from image_preprocessing import ImagePreprocessor
-from PIL import Image  # Add this line
-import io  # Add this too
+from PIL import Image
+import io
 from screenshot_capture import get_screenshot_data, cleanup_screenshot_capture
-import os
-import requests
-import gdown 
-
+import gdown
+import dns.resolver
+import traceback
 
 # Disable SSL warnings for internal requests
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -35,12 +71,10 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 app = Flask(__name__)
 
 atexit.register(cleanup_screenshot_capture)
+
 # Google Safe Browsing API Configuration
 GOOGLE_SAFE_BROWSING_API_KEY = os.environ.get('GOOGLE_SAFE_BROWSING_API_KEY', '')
-
 GOOGLE_SAFE_BROWSING_URL = "https://safebrowsing.googleapis.com/v4/threatMatches:find"
-
-
 
 # List of trusted subdomain providers
 TRUSTED_SUBDOMAIN_PROVIDERS = {
@@ -56,11 +90,285 @@ TRUSTED_SUBDOMAIN_PROVIDERS = {
     'weebly.com': 'Weebly'
 }
 
+# ========== MODEL LOADING SECTION ==========
+print("\n" + "="*70)
+print("🤖 PHISHING DETECTOR - INITIALIZING MODELS")
+print("="*70)
+
+# Global model variables
+models_loaded = {}
+feature_names = {}
+ML_MODELS_AVAILABLE = False
+phishing_model = None
+preprocessor = None
+ml_model = None
+
+def fix_numpy_for_pickle():
+    """Additional numpy fixes for pickle loading"""
+    try:
+        # Monkey-patch numpy for pickle compatibility
+        import numpy.core.multiarray
+        import numpy.core.umath
+        import numpy.core.overrides
+        import numpy.core._multiarray_umath
+        
+        # Create necessary module references
+        if not hasattr(np.core, '_multiarray_umath'):
+            np.core._multiarray_umath = numpy.core._multiarray_umath
+        
+        if not hasattr(np.core, 'multiarray'):
+            np.core.multiarray = numpy.core.multiarray
+            
+        if not hasattr(np.core, 'umath'):
+            np.core.umath = numpy.core.umath
+            
+        if not hasattr(np.core, 'overrides'):
+            np.core.overrides = numpy.core.overrides
+            
+        print("✅ Numpy pickle compatibility applied")
+        
+    except Exception as e:
+        print(f"⚠️ Numpy pickle fix warning: {e}")
+
+# Apply fixes before loading models
+fix_numpy_for_pickle()
+
+def download_ensemble_model():
+    """Download ensemble model with multiple fallback methods"""
+    model_path = 'models/ensemble_model.pkl'
+    
+    if os.path.exists(model_path):
+        size = os.path.getsize(model_path) / 1024 / 1024
+        print(f"✅ Ensemble model already exists: {size:.2f} MB")
+        return True
+    
+    print("📥 Attempting to download ensemble model...")
+    
+    # Google Drive ID
+    file_id = "1NM9GNh-qolCMTxk3Bds-4zjGf8uqrex"
+    
+    # Try multiple download methods
+    methods = [
+        ("gdown", lambda: gdown.download(f"https://drive.google.com/uc?id={file_id}", model_path, quiet=False)),
+        ("direct", lambda: gdown.download(f"https://drive.google.com/uc?export=download&id={file_id}", model_path, quiet=False)),
+        ("requests", lambda: download_with_requests(file_id, model_path))
+    ]
+    
+    for method_name, method_func in methods:
+        try:
+            print(f"  Trying {method_name}...")
+            if method_name == "requests":
+                success = method_func()
+            else:
+                method_func()
+                success = os.path.exists(model_path)
+            
+            if success:
+                size = os.path.getsize(model_path) / 1024 / 1024 if os.path.exists(model_path) else 0
+                print(f"✅ Downloaded via {method_name}: {size:.2f} MB")
+                return True
+                
+        except Exception as e:
+            print(f"  ❌ {method_name} failed: {str(e)[:100]}")
+    
+    print("❌ All download methods failed")
+    return False
+
+def download_with_requests(file_id, output_path):
+    """Download using requests as fallback"""
+    try:
+        import requests
+        
+        # Try different URL formats
+        urls = [
+            f"https://drive.google.com/uc?export=download&id={file_id}",
+            f"https://docs.google.com/uc?export=download&id={file_id}",
+        ]
+        
+        for url in urls:
+            try:
+                response = requests.get(url, stream=True, timeout=30)
+                response.raise_for_status()
+                
+                with open(output_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                
+                return os.path.exists(output_path)
+                
+            except Exception as e:
+                print(f"    URL {url} failed: {e}")
+                continue
+        
+        return False
+    except Exception as e:
+        print(f"Requests download error: {e}")
+        return False
+
+def load_model_with_fallback(model_path, model_name):
+    """Load a model with multiple fallback strategies"""
+    if not os.path.exists(model_path):
+        print(f"❌ {model_name}: File not found")
+        return None, []
+    
+    try:
+        file_size = os.path.getsize(model_path) / 1024 / 1024
+        print(f"📦 Loading {model_name} ({file_size:.2f} MB)...")
+        
+        # For .pkl files
+        if model_path.endswith('.pkl'):
+            # Try joblib first
+            try:
+                print("  Trying joblib...")
+                data = joblib.load(model_path)
+                print(f"  ✅ Loaded with joblib")
+            except Exception as e1:
+                print(f"  ❌ Joblib failed: {str(e1)[:100]}")
+                # Try pickle with custom fix
+                try:
+                    print("  Trying pickle with numpy fix...")
+                    # Apply additional numpy fixes
+                    import numpy.core.multiarray
+                    import numpy.core._multiarray_umath
+                    
+                    with open(model_path, 'rb') as f:
+                        data = pickle.load(f)
+                    print(f"  ✅ Loaded with pickle")
+                except Exception as e2:
+                    print(f"  ❌ Pickle failed: {str(e2)[:100]}")
+                    return None, []
+            
+            # Extract model and features
+            model = None
+            features = []
+            
+            if isinstance(data, dict):
+                # Extract from dictionary
+                model = data.get('model') or data.get('ensemble_model') or data.get('classifier')
+                features = data.get('feature_names', [])
+                if model is None and 'model' in str(type(data)):
+                    model = data
+            else:
+                # Raw model
+                model = data
+            
+            if model is not None:
+                return model, features
+            else:
+                print(f"  ❌ Could not extract model from data")
+                return None, []
+        
+        # For .h5 files (TensorFlow models)
+        elif model_path.endswith('.h5'):
+            try:
+                print("  Loading TensorFlow model...")
+                # Try different loading methods
+                try:
+                    model = tf.keras.models.load_model(model_path, compile=False)
+                except:
+                    # Try without safe mode
+                    model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
+                
+                print(f"  ✅ TensorFlow model loaded")
+                return model, []
+                
+            except Exception as e:
+                print(f"  ❌ TensorFlow load failed: {str(e)[:100]}")
+                return None, []
+        
+        return None, []
+        
+    except Exception as e:
+        print(f"❌ Error loading {model_name}: {str(e)[:200]}")
+        return None, []
+
+def load_all_models():
+    """Load all available ML models"""
+    global models_loaded, feature_names, ML_MODELS_AVAILABLE, phishing_model, preprocessor, ml_model
+    
+    print("\n" + "="*70)
+    print("🔄 LOADING MACHINE LEARNING MODELS")
+    print("="*70)
+    
+    # Create models directory
+    os.makedirs('models', exist_ok=True)
+    
+    # Check available files
+    print("📁 Checking model files:")
+    available_files = []
+    if os.path.exists('models'):
+        for file in os.listdir('models'):
+            if file.endswith(('.pkl', '.h5', '.joblib')):
+                path = os.path.join('models', file)
+                size = os.path.getsize(path) / 1024 / 1024
+                available_files.append((file, path, size))
+                print(f"  • {file} ({size:.2f} MB)")
+    
+    if not available_files:
+        print("  ❌ No model files found")
+        return
+    
+    # Download ensemble model if missing
+    ensemble_path = 'models/ensemble_model.pkl'
+    if not os.path.exists(ensemble_path):
+        print("\n📥 Ensemble model not found, attempting download...")
+        download_ensemble_model()
+    
+    # Load models in specific order
+    models_to_load = [
+        ('ensemble_model.pkl', 'ensemble'),
+        ('phishing_model.pkl', 'original'),
+        ('phishing_detector.h5', 'cnn')
+    ]
+    
+    for filename, model_key in models_to_load:
+        model_path = f'models/{filename}'
+        
+        if os.path.exists(model_path):
+            model, features = load_model_with_fallback(model_path, filename)
+            
+            if model is not None:
+                models_loaded[model_key] = model
+                feature_names[model_key] = features
+                print(f"✅ {model_key.upper()} model loaded successfully")
+                
+                # Set specific global variables
+                if model_key == 'cnn':
+                    phishing_model = PhishingImageModel()
+                    phishing_model.model = model
+                    preprocessor = ImagePreprocessor()
+                elif model_key in ['ensemble', 'original']:
+                    ml_model = model
+            else:
+                print(f"❌ Failed to load {filename}")
+        else:
+            print(f"⚠️  {filename} not found, skipping...")
+    
+    # Update availability flag
+    ML_MODELS_AVAILABLE = len(models_loaded) > 0
+    
+    print("\n" + "="*70)
+    print("📊 MODEL LOADING SUMMARY")
+    print("="*70)
+    
+    if ML_MODELS_AVAILABLE:
+        print(f"✅ SUCCESS: Loaded {len(models_loaded)} model(s)")
+        for name in models_loaded.keys():
+            print(f"  • {name.upper()}: {type(models_loaded[name]).__name__}")
+    else:
+        print("⚠️  WARNING: No ML models loaded")
+        print("ℹ️  Using rule-based detection only")
+    
+    print("="*70 + "\n")
+
+# Load all models on startup
+load_all_models()
+
+# ========== CORE FUNCTIONS ==========
 
 def is_valid_url(url):
-    """
-    Validate if the input is a proper URL
-    """
+    """Validate if the input is a proper URL"""
     try:
         # Allow URLs without protocol for user convenience
         test_url = url
@@ -84,16 +392,16 @@ def is_valid_url(url):
         
         # Check if TLD is reasonable (at least 2 characters for real domains)
         tld = domain_parts[-1]
-        if len(tld) < 2 and tld not in ['io', 'ai', 'tv']:  # Allow common short TLDs
+        if len(tld) < 2 and tld not in ['io', 'ai', 'tv']:
             return False
             
         return True
     except:
         return False
+
 def check_google_safe_browsing(url):
-    """Check URL against Google Safe Browsing API - FIXED"""
+    """Check URL against Google Safe Browsing API"""
     try:
-        # Check if API credentials are available
         if not GOOGLE_SAFE_BROWSING_API_KEY:
             return {
                 'error': 'Google Safe Browsing API key not configured',
@@ -101,7 +409,6 @@ def check_google_safe_browsing(url):
                 'success': False
             }
         
-        # Extract domain for broader checking
         parsed = urlparse(url)
         domain = parsed.netloc
         
@@ -116,7 +423,7 @@ def check_google_safe_browsing(url):
                 "threatEntryTypes": ["URL"],
                 "threatEntries": [
                     {"url": url},
-                    {"url": f"https://{domain}"}  # Also check domain
+                    {"url": f"https://{domain}"}
                 ]
             }
         }
@@ -124,7 +431,7 @@ def check_google_safe_browsing(url):
         response = requests.post(
             f"{GOOGLE_SAFE_BROWSING_URL}?key={GOOGLE_SAFE_BROWSING_API_KEY}",
             json=payload,
-            timeout=5  # 5 second timeout
+            timeout=5
         )
         
         if response.status_code == 200:
@@ -157,34 +464,33 @@ def check_google_safe_browsing(url):
             'is_threat': False,
             'success': False
         }
-# Image Analysis Setup
-phishing_model = None
-preprocessor = None
 
 def load_image_model():
+    """Load the image model if not already loaded"""
     global phishing_model, preprocessor
-
-    IMAGE_MODEL_PATH = "models/phishing_detector.h5"  # <-- fix here if needed
-
-    if not os.path.exists(IMAGE_MODEL_PATH):
-        print(f"❌ Image model file NOT FOUND at {IMAGE_MODEL_PATH}")
-        print("Available files in models/:", os.listdir("models"))
-        return
-
-    try:
-        phishing_model = PhishingImageModel()
-        phishing_model.model = tf.keras.models.load_model(IMAGE_MODEL_PATH)
-        preprocessor = ImagePreprocessor()
-        print("✅ Phishing image detection model loaded successfully!")
-    except Exception as e:
-        print(f"❌ Failed to load image model: {e}")
-
+    
+    if phishing_model is None or preprocessor is None:
+        IMAGE_MODEL_PATH = "models/phishing_detector.h5"
+        
+        if os.path.exists(IMAGE_MODEL_PATH):
+            try:
+                phishing_model = PhishingImageModel()
+                phishing_model.model = tf.keras.models.load_model(IMAGE_MODEL_PATH)
+                preprocessor = ImagePreprocessor()
+                print("✅ Phishing image detection model loaded!")
+            except Exception as e:
+                print(f"❌ Failed to load image model: {e}")
 
 def analyze_website_screenshot(image_path):
+    """Analyze website screenshot for phishing indicators"""
     global phishing_model, preprocessor
+    
     try:
         if phishing_model is None or preprocessor is None:
-            return {'error': 'Model not loaded'}
+            load_image_model()
+            
+        if phishing_model is None or preprocessor is None:
+            return {'error': 'Image model not loaded'}
         
         test_image = preprocessor.load_and_preprocess_image(image_path)
         if test_image is not None:
@@ -198,8 +504,6 @@ def analyze_website_screenshot(image_path):
         return {'error': 'Failed to process image'}
     except Exception as e:
         return {'error': str(e)}
-# Global variable for ML model (add at the top with other globals)
-ml_model=None
 
 def predict_with_ml(features, timeout=30):
     """Make prediction using ML model with fallback to rule-based"""
@@ -217,7 +521,7 @@ def predict_with_ml(features, timeout=30):
         
         # For binary classification: [legit_prob, phishing_prob]
         if len(probability) == 2:
-            phishing_confidence = probability[1] * 100  # Probability it's phishing
+            phishing_confidence = probability[1] * 100
         else:
             phishing_confidence = probability[0] * 100
         
@@ -233,10 +537,10 @@ def predict_with_ml(features, timeout=30):
         return rule_based_prediction(features)
 
 def prepare_ml_features(features):
-    """Prepare features for ML model prediction - SIMPLIFIED VERSION"""
+    """Prepare features for ML model prediction"""
     # If you don't have a trained model yet, return dummy features
     # This will work with the rule-based fallback
-    return [[0]]  # Dummy array that will trigger the fallback
+    return [[0]]
 
 def rule_based_prediction(features):
     """Fallback rule-based prediction when ML fails"""
@@ -273,22 +577,16 @@ def rule_based_prediction(features):
         'confidence': confidence,
         'method': 'rule_based_fallback',
         'reasons': reasons
-    }    
-import re
-from urllib.parse import urlparse, parse_qs
-import tldextract
-import idna
+    }
 
 def is_suspicious_heuristic(url):
     """Balanced heuristic detection for phishing patterns"""
-    # Convert to lowercase for case-insensitive matching
     url_lower = url.lower()
     
     parsed = urlparse(url_lower)
     domain = parsed.netloc
     path = parsed.path
     
-    # Extract domain components using tldextract for better accuracy
     ext = tldextract.extract(url_lower)
     domain_name = ext.domain
     subdomain = ext.subdomain
@@ -303,7 +601,7 @@ def is_suspicious_heuristic(url):
         'twitter.com', 'github.com', 'blogspot.com', 'wordpress.com',
         'yahoo.com', 'outlook.com', 'hotmail.com', 'gmail.com',
         'instagram.com', 'whatsapp.com', 'telegram.org',
-        'ibnsinatrust.com'  # ADD THE SPECIFIC SITE THAT'S BEING FLAGGED
+        'ibnsinatrust.com'
     ]
     
     # FIRST: Check if it's a legitimate domain - if yes, return False immediately
@@ -315,7 +613,7 @@ def is_suspicious_heuristic(url):
         r'.*\.paypal\.com$', r'.*\.facebook\.com$', r'.*\.google\.com$',
         r'.*\.microsoft\.com$', r'.*\.apple\.com$', r'.*\.amazon\.com$',
         r'.*\.github\.io$', r'.*\.netlify\.app$', r'.*\.herokuapp\.com$',
-        r'.*\.ibnsinatrust\.com$'  # ADD THIS TOO
+        r'.*\.ibnsinatrust\.com$'
     ]
     
     for pattern in legitimate_patterns:
@@ -324,7 +622,7 @@ def is_suspicious_heuristic(url):
     
     # FIXED: Only truly suspicious TLDs
     suspicious_tlds = [
-        '.tk', '.ml', '.ga', '.cf', '.gq'  # Free TLDs known for abuse
+        '.tk', '.ml', '.ga', '.cf', '.gq'
     ]
     
     # FIXED: More specific phishing keywords (avoid common terms)
@@ -381,18 +679,15 @@ def is_suspicious_heuristic(url):
                 return True
     
     # Check 7: Very long domains (only flag extremely long ones)
-    if len(domain) > 75:  # Increased from 50
+    if len(domain) > 75:
         return True
     
     # Check 8: Excessive subdomains
-    if subdomain.count('.') > 3:  # More than 4 subdomain levels
+    if subdomain.count('.') > 3:
         return True
     
     return False
 
-
-
-    
 def enhanced_heuristic_check(url):
     """Enhanced check with scoring"""
     if is_suspicious_heuristic(url):
@@ -409,35 +704,11 @@ def enhanced_heuristic_check(url):
             'risk_level': 'LOW'
         }
 
-
-def combined_analysis_simple(url, ml_features):
-    """ML primary with heuristic as confidence booster"""
-    heuristic_result = enhanced_heuristic_check(url)  # Your function
-    ml_result = predict_with_ml(ml_features)
-    
-    # Start with ML decision
-    final_result = {
-        'is_phishing': ml_result.get('is_phishing', False),
-        'confidence': ml_result.get('confidence', 0),
-        'heuristic': heuristic_result,  # Include full heuristic data
-        'ml_prediction': ml_result
-    }
-    
-    # Use heuristic to adjust confidence
-    if heuristic_result['suspicious']:
-        if heuristic_result['risk_level'] == 'HIGH':
-            final_result['confidence'] = min(100, final_result['confidence'] + 15)
-        elif heuristic_result['risk_level'] == 'MEDIUM':
-            final_result['confidence'] = min(100, final_result['confidence'] + 8)
-    
-    return final_result
-# Additional scoring function for more granular detection
 def calculate_phishing_score(url):
     """Calculate a phishing probability score (0-100)"""
     score = 0
     url_lower = url.lower()
     
-    # Various checks that add to the score
     checks = [
         (re.search(r'paypa[0-9il]', url_lower), 20),
         (re.search(r'facebo[0-9ok]', url_lower), 20),
@@ -455,12 +726,10 @@ def calculate_phishing_score(url):
     
     return min(score, 100)
 
-
 def extract_basic_url_features(url):
     """Extract EXACTLY 87 features that match the trained model"""
     features = {}
     
-    # Extract domain components first
     try:
         te = tldextract.extract(url)
         domain = te.domain
@@ -471,9 +740,7 @@ def extract_basic_url_features(url):
         domain = suffix = subdomain = ""
         full_domain = ""
     
-    # === EXACT 87 FEATURES FROM YOUR TRAINING LOG ===
-    
-    # 1. Basic URL features
+    # Basic URL features
     features['length_url'] = len(url)
     features['length_hostname'] = len(te.domain) + len(te.suffix) if te.domain and te.suffix else 0
     features['ip'] = 1 if re.search(r'\d+\.\d+\.\d+\.\d+', url) else 0
@@ -482,7 +749,7 @@ def extract_basic_url_features(url):
     features['nb_at'] = url.count('@')
     features['nb_qm'] = url.count('?')
     features['nb_and'] = url.count('&')
-    features['nb_or'] = url.count('|')  # Added this missing feature
+    features['nb_or'] = url.count('|')
     features['nb_eq'] = url.count('=')
     features['nb_underscore'] = url.count('_')
     features['nb_tilde'] = url.count('~')
@@ -498,36 +765,36 @@ def extract_basic_url_features(url):
     features['nb_com'] = 1 if '.com' in url.lower() else 0
     features['nb_dslash'] = url.count('//')
     
-    # 2. Path and protocol features
+    # Path and protocol features
     features['http_in_path'] = 1 if 'http:' in url.lower() else 0
     features['https_token'] = 1 if 'https' in url.lower() else 0
     
-    # 3. Digit ratios
+    # Digit ratios
     digits_in_url = len(re.findall(r'\d', url))
     features['ratio_digits_url'] = digits_in_url / len(url) if len(url) > 0 else 0
     
     digits_in_host = len(re.findall(r'\d', full_domain))
     features['ratio_digits_host'] = digits_in_host / len(full_domain) if len(full_domain) > 0 else 0
     
-    # 4. Domain features
+    # Domain features
     features['punycode'] = 1 if 'xn--' in url.lower() else 0
     features['port'] = 1 if re.search(r':\d+', url) else 0
     features['tld_in_path'] = 1 if any(tld in url.lower().split('/')[-1] for tld in ['.com', '.org', '.net']) else 0
     features['tld_in_subdomain'] = 1 if any(tld in subdomain.lower() for tld in ['.com', '.org', '.net']) else 0
     features['abnormal_subdomain'] = 1 if len(subdomain) > 50 else 0
     features['nb_subdomains'] = len(subdomain.split('.')) if subdomain else 0
-    features['prefix_suffix'] = 1 if re.search(r'-\w+\.\w+\.\w+', url) else 0  # e.g., example-com.domain.com
+    features['prefix_suffix'] = 1 if re.search(r'-\w+\.\w+\.\w+', url) else 0
     
-    # 5. Random domain and shortening
+    # Random domain and shortening
     features['random_domain'] = 1 if len(domain) < 4 or len(domain) > 15 else 0
     features['shortening_service'] = 1 if any(short in url.lower() for short in ['bit.ly', 'goo.gl', 'tinyurl', 't.co', 'ow.ly']) else 0
     features['path_extension'] = 1 if re.search(r'\.(exe|zip|rar|js|css)$', url.lower()) else 0
     
-    # 6. Redirection features (simplified)
+    # Redirection features
     features['nb_redirection'] = url.count('redirect') + url.count('url=')
     features['nb_external_redirection'] = url.count('http') - 1 if url.count('http') > 1 else 0
     
-    # 7. Word-based features
+    # Word-based features
     words = re.findall(r'[a-zA-Z]+', url)
     features['length_words_raw'] = len(words)
     features['char_repeat'] = max([len(list(g)) for k, g in groupby(url)]) if url else 0
@@ -545,14 +812,14 @@ def extract_basic_url_features(url):
     features['avg_word_host'] = sum([len(word) for word in re.findall(r'[a-zA-Z]+', full_domain)]) / len(re.findall(r'[a-zA-Z]+', full_domain)) if full_domain else 0
     features['avg_word_path'] = sum([len(word) for word in re.findall(r'[a-zA-Z]+', url.split('/')[-1])]) / len(re.findall(r'[a-zA-Z]+', url.split('/')[-1])) if '/' in url else 0
     
-    # 8. Phishing hints and brand detection
+    # Phishing hints and brand detection
     features['phish_hints'] = sum(1 for keyword in ['login', 'verify', 'secure', 'account', 'banking'] if keyword in url.lower())
     features['domain_in_brand'] = 1 if any(brand in url.lower() for brand in ['paypal', 'facebook', 'google', 'microsoft']) else 0
     features['brand_in_subdomain'] = 1 if any(brand in subdomain.lower() for brand in ['paypal', 'facebook', 'google', 'microsoft']) else 0
     features['brand_in_path'] = 1 if any(brand in url.lower().split('/')[-1] for brand in ['paypal', 'facebook', 'google', 'microsoft']) else 0
     features['suspecious_tld'] = 1 if any(tld in suffix.lower() for tld in ['.tk', '.ml', '.ga', '.cf']) else 0
     
-    # 9. Statistical and HTML features (set defaults as these require full page analysis)
+    # Statistical and HTML features (defaults)
     features['statistical_report'] = 0
     features['nb_hyperlinks'] = 0
     features['ratio_intHyperlinks'] = 0
@@ -569,7 +836,7 @@ def extract_basic_url_features(url):
     features['submit_email'] = 0
     features['ratio_intMedia'] = 0
     features['ratio_extMedia'] = 0
-    features['sfh'] = 0  # Server Form Handler
+    features['sfh'] = 0
     features['iframe'] = 0
     features['popup_window'] = 0
     features['safe_anchor'] = 0
@@ -579,7 +846,7 @@ def extract_basic_url_features(url):
     features['domain_in_title'] = 0
     features['domain_with_copyright'] = 0
     
-    # 10. WHOIS and reputation features (set defaults)
+    # WHOIS and reputation features (defaults)
     features['whois_registered_domain'] = 0
     features['domain_registration_length'] = 0
     features['domain_age'] = 0
@@ -590,7 +857,6 @@ def extract_basic_url_features(url):
     
     print(f"🔍 Extracted {len(features)} features for ML model")
     return features
-
 
 def is_trusted_subdomain(url):
     """Check if URL uses a trusted subdomain provider"""
@@ -635,7 +901,6 @@ def hybrid_prediction(url, features):
                 feature_vector.append(features.get(feature_name, 0))
             
             # Convert to DataFrame with proper feature names
-            import pandas as pd
             X_pred = pd.DataFrame([feature_vector], columns=expected_features)
             
             # Now predict with properly named features
@@ -644,8 +909,7 @@ def hybrid_prediction(url, features):
             
             probability = probabilities[prediction]
             
-            # ✅ FIXED: Reverse the logic
-            class_label = "legitimate" if prediction == 1 else "phishing"  # CHANGED THIS LINE
+            class_label = "legitimate" if prediction == 1 else "phishing"
             confidence = get_confidence_label(probability, class_label)
                 
             results['ensemble'] = {
@@ -669,7 +933,6 @@ def hybrid_prediction(url, features):
                 feature_vector.append(features.get(feature_name, 0))
             
             # Convert to DataFrame with proper feature names
-            import pandas as pd
             X_pred = pd.DataFrame([feature_vector], columns=expected_features)
             
             prediction = models_loaded['original'].predict(X_pred)[0]
@@ -677,8 +940,7 @@ def hybrid_prediction(url, features):
             
             probability = probabilities[prediction]
             
-            # ✅ FIXED: Reverse the logic
-            class_label = "legitimate" if prediction == 1 else "phishing"  # CHANGED THIS LINE
+            class_label = "legitimate" if prediction == 1 else "phishing"
             confidence = get_confidence_label(probability, class_label)
                 
             results['original'] = {
@@ -693,55 +955,9 @@ def hybrid_prediction(url, features):
             print(f"Original model error: {e}")
     
     return results
-def debug_model_prediction(url):
-    """Debug function to understand model predictions"""
-    print(f"\n🔧 DEBUGGING PREDICTION FOR: {url}")
-    
-    features = extract_basic_url_features(url)
-    print(f"📊 Features extracted: {len(features)} features")
-    
-    # Show some key features
-    key_features = ['url_len', 'nb_dots', 'nb_hyphens', 'length_hostname', 'nb_subdomains']
-    for kf in key_features:
-        print(f"   {kf}: {features.get(kf, 'N/A')}")
-    
-    # Test both models if available
-    if 'ensemble' in models_loaded:
-        try:
-            feature_vector = []
-            for feature_name in feature_names['ensemble']:
-                feature_vector.append(features.get(feature_name, 0))
-            
-            prediction = models_loaded['ensemble'].predict([feature_vector])[0]
-            probabilities = models_loaded['ensemble'].predict_proba([feature_vector])[0]
-            
-            print(f"🎯 Ensemble Model:")
-            print(f"   Prediction: {prediction} ({'phishing' if prediction == 1 else 'legitimate'})")
-            print(f"   Probabilities: [legitimate: {probabilities[0]:.2%}, phishing: {probabilities[1]:.2%}]")
-            
-        except Exception as e:
-            print(f"❌ Ensemble model debug error: {e}")
-    
-    if 'original' in models_loaded:
-        try:
-            feature_vector = []
-            for feature_name in feature_names['original']:
-                feature_vector.append(features.get(feature_name, 0))
-            
-            prediction = models_loaded['original'].predict([feature_vector])[0]
-            probabilities = models_loaded['original'].predict_proba([feature_vector])[0]
-            
-            print(f"🎯 Original Model:")
-            print(f"   Prediction: {prediction} ({'phishing' if prediction == 1 else 'legitimate'})")
-            print(f"   Probabilities: [legitimate: {probabilities[0]:.2%}, phishing: {probabilities[1]:.2%}]")
-            
-        except Exception as e:
-            print(f"❌ Original model debug error: {e}")
-    
-    print("🔧 DEBUG COMPLETE\n")
 
 def hybrid_scan_url(url, features):
-    """Hybrid scanning: Google Safe Browsing + ML fallback + Heuristic - ENHANCED"""
+    """Hybrid scanning: Google Safe Browsing + ML fallback + Heuristic"""
     print(f"🔍 Scanning: {url}")
     start_time = time.time()
     heuristic_result = is_suspicious_heuristic(url)
@@ -772,91 +988,20 @@ def hybrid_scan_url(url, features):
         'special_message': None
     }
     
-    # STEP 2: Check if it's a Blogger site and apply special logic
+    # STEP 2: Check if it's a trusted subdomain
     is_trusted, provider = is_trusted_subdomain(url)
-    if is_trusted and 'blogspot.com' in url.lower():
-        print(f"🔍 Blogger site detected: {url}")
-        
-        # For Blogger sites, use ML model to determine trustworthiness
-        ml_results = hybrid_prediction(url, features)
-        
-        if 'ensemble' in ml_results or 'original' in ml_results:
-            ml_result = ml_results.get('ensemble') or ml_results.get('original')
-            # ✅ FIX: Use class_label instead of prediction to determine if phishing
-            is_phishing = ml_result['class_label'] == 'phishing'
-            probability = ml_result['probability']
-            
-            if is_phishing and probability > 0.9:
-                # Suspicious Blogger site
-                results['final_verdict'] = True
-                results['confidence'] = "⚠️ CAUTION ADVISED"
-                results['scan_method'] = 'blogger_suspicious'
-                results['probability'] = probability
-                results['class_label'] = 'phishing'
-                results['special_message'] = "This website uses Google Blogger service. While the platform is trusted, this specific site shows suspicious characteristics. Confidence: Low"
-                results['trusted_subdomain'] = True
-                results['subdomain_provider'] = provider
-                print(f"🔍 Suspicious Blogger site detected with probability: {probability:.2%}")
-                return results
-            else:
-                # Safe Blogger site
-                results['final_verdict'] = False
-                results['confidence'] = "✅ TRUSTED PLATFORM"
-                results['scan_method'] = 'blogger_safe'
-                results['probability'] = probability
-                results['class_label'] = 'legitimate'
-                results['special_message'] = "This website uses Google Blogger service. The platform is trusted. Confidence: High"
-                results['trusted_subdomain'] = True
-                results['subdomain_provider'] = provider
-                print(f"🔍 Safe Blogger site detected with probability: {probability:.2%}")
-                return results
     
-    # STEP 3: Check other trusted subdomains (GitHub Pages, Netlify, etc.)
-    if is_trusted and provider:
-        print(f"🔍 Trusted platform detected: {provider}")
-        # For other trusted platforms, still run security checks but with platform context
-        ml_results = hybrid_prediction(url, features)
-        
-        if 'ensemble' in ml_results or 'original' in ml_results:
-            ml_result = ml_results.get('ensemble') or ml_results.get('original')
-            # ✅ FIX: Use class_label instead of prediction to determine if phishing
-            is_phishing = ml_result['class_label'] == 'phishing'
-            probability = ml_result['probability']
-            
-            if is_phishing or probability > 0.7:
-                # Suspicious content on trusted platform
-                results['final_verdict'] = True
-                results['confidence'] = "⚠️ CAUTION ADVISED"
-                results['scan_method'] = 'trusted_platform_suspicious'
-                results['probability'] = probability
-                results['class_label'] = 'phishing'
-                results['special_message'] = f"This website uses {provider} service. While the platform is trusted, this specific site shows suspicious characteristics."
-                results['trusted_subdomain'] = True
-                results['subdomain_provider'] = provider
-                return results
-            else:
-                # Likely safe content on trusted platform
-                results['final_verdict'] = False
-                results['confidence'] = "✅ TRUSTED PLATFORM"
-                results['scan_method'] = 'trusted_platform_safe'
-                results['probability'] = probability
-                results['class_label'] = 'legitimate'
-                results['special_message'] = f"This website uses {provider} service. The platform is trusted."
-                results['trusted_subdomain'] = True
-                results['subdomain_provider'] = provider
-                return results
-    
-    # STEP 4: Try Google Safe Browsing first (with timeout)
+    # STEP 3: Try Google Safe Browsing first (with timeout)
     try:
         google_result = check_google_safe_browsing(url)
         results['google_safe_browsing'] = google_result
         print(f"🔍 Google Safe Browsing result: {google_result}")
         if google_result.get('is_threat'):
-            results['final_verdict'] = True  # Phishing
+            results['final_verdict'] = True
             results['confidence'] = "🚨 VERY HIGH CONFIDENCE - PHISHING (Google Safe Browsing)"
             results['scan_method'] = 'google_safe_browsing'
             results['threat_types'] = google_result.get('threat_types', [])
-            results['probability'] = 0.95  # Very high confidence for Google
+            results['probability'] = 0.95
             results['class_label'] = 'phishing'
             results['special_message'] = f"⚠️ Confirmed threat by Google Safe Browsing: {', '.join(results['threat_types'])}"
             return results
@@ -865,13 +1010,12 @@ def hybrid_scan_url(url, features):
         print(f"Google Safe Browsing exception: {e}")
         results['google_safe_browsing'] = {'error': str(e), 'is_threat': False, 'success': False}
     
-    # STEP 5: Fallback to ML model
+    # STEP 4: Fallback to ML model
     ml_results = hybrid_prediction(url, features)
     
     if 'ensemble' in ml_results:
         ml_result = ml_results['ensemble']
         results['ml_prediction'] = ml_result
-        # ✅ FIX: Use class_label to determine final_verdict
         results['final_verdict'] = (ml_result['class_label'] == 'phishing')
         results['confidence'] = ml_result['confidence']
         results['scan_method'] = 'ml_model'
@@ -888,7 +1032,6 @@ def hybrid_scan_url(url, features):
     elif 'original' in ml_results:
         ml_result = ml_results['original']
         results['ml_prediction'] = ml_result
-        # ✅ FIX: Use class_label to determine final_verdict
         results['final_verdict'] = (ml_result['class_label'] == 'phishing')
         results['confidence'] = ml_result['confidence']
         results['scan_method'] = 'ml_model'
@@ -903,7 +1046,7 @@ def hybrid_scan_url(url, features):
             results['special_message'] = "✅ ML model analysis shows legitimate website"
             
     else:
-        # STEP 6: If both ML models fail, use basic heuristic as final fallback
+        # STEP 5: If both ML models fail, use basic heuristic as final fallback
         fallback_heuristic = is_suspicious_heuristic(url)
         results['final_verdict'] = fallback_heuristic
         results['confidence'] = "🟡 MEDIUM CONFIDENCE - HEURISTIC FALLBACK"
@@ -912,18 +1055,15 @@ def hybrid_scan_url(url, features):
         results['class_label'] = 'phishing' if results['final_verdict'] else 'legitimate'
         results['special_message'] = "⚠️ Using basic heuristic analysis as final fallback"
     
-    # STEP 7: Add trusted subdomain info if applicable (for non-Blogger trusted sites that passed all checks)
+    # STEP 6: Add trusted subdomain info if applicable
     if is_trusted and provider and not results.get('trusted_subdomain'):
         results['trusted_subdomain'] = True
         results['subdomain_provider'] = provider
-        # Only add platform info if the site passed security checks
         if not results['final_verdict'] and results['special_message']:
             results['special_message'] += f" | Platform: {provider}"
     
     return results
 
-
-# New functions for additional data extraction
 def extract_contact_info(url):
     """Extract emails and phone numbers from the website"""
     try:
@@ -937,11 +1077,11 @@ def extract_contact_info(url):
         email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
         emails = re.findall(email_pattern, content)
         
-        # Extract phone numbers (international format)
+        # Extract phone numbers
         phone_pattern = r'(\+?\d{1,3}[-.\s]?)?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,9}'
         phones = re.findall(phone_pattern, content)
         phones = [phone[0] if isinstance(phone, tuple) else phone for phone in phones]
-        phones = [p.strip() for p in phones if len(p.strip()) > 7]  # Filter out too short numbers
+        phones = [p.strip() for p in phones if len(p.strip()) > 7]
         
         # Find contact page URLs
         contact_patterns = [
@@ -959,9 +1099,9 @@ def extract_contact_info(url):
                     contact_urls.append(match)
         
         return {
-            'emails': list(set(emails))[:10],  # Limit to 10 unique emails
-            'phones': list(set(phones))[:10],  # Limit to 10 unique phones
-            'contact_pages': list(set(contact_urls))[:5]  # Limit to 5 contact pages
+            'emails': list(set(emails))[:10],
+            'phones': list(set(phones))[:10],
+            'contact_pages': list(set(contact_urls))[:5]
         }
     except Exception as e:
         print(f"Error extracting contact info: {e}")
@@ -982,10 +1122,8 @@ def check_ssl_info(url):
             with context.wrap_socket(sock, server_hostname=domain) as ssock:
                 cert = ssock.getpeercert()
                 
-                # Check if SSL is valid
                 ssl_status = cert is not None
                 
-                # Get expiry date
                 ssl_expiry = None
                 if cert and 'notAfter' in cert:
                     expiry_str = cert['notAfter']
@@ -1000,15 +1138,12 @@ def check_ssl_info(url):
         print(f"Error checking SSL: {e}")
         return {'has_ssl': False, 'ssl_expiry': None}
 
-# Use dnspython for comprehensive DNS checks
-
 def get_domain_age(url):
     """Get domain registration age"""
     try:
         parsed = urlparse(url)
         domain = parsed.netloc
         
-        # Remove www prefix if present
         if domain.startswith('www.'):
             domain = domain[4:]
             
@@ -1028,7 +1163,7 @@ def get_domain_age(url):
         return None
 
 def check_website_reachability(url):
-    """Check if website is reachable and measure response time - IMPROVED"""
+    """Check if website is reachable and measure response time"""
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -1039,10 +1174,9 @@ def check_website_reachability(url):
             'Upgrade-Insecure-Requests': '1',
         }
         
-        # Try multiple approaches
         start_time = time.time()
         
-        # First try: HEAD request (faster)
+        # First try: HEAD request
         try:
             response = requests.head(url, timeout=10, verify=False, headers=headers, allow_redirects=True)
             end_time = time.time()
@@ -1058,7 +1192,7 @@ def check_website_reachability(url):
         except:
             pass
         
-        # Second try: GET request with shorter timeout
+        # Second try: GET request
         try:
             start_time = time.time()
             response = requests.get(url, timeout=8, verify=False, headers=headers, allow_redirects=True)
@@ -1085,27 +1219,6 @@ def check_website_reachability(url):
                 'response_time': None,
                 'error': 'Connection error'
             }
-        except requests.exceptions.SSLError:
-            # Try without SSL verification as fallback
-            try:
-                start_time = time.time()
-                response = requests.get(url, timeout=8, verify=True, headers=headers, allow_redirects=True)
-                end_time = time.time()
-                response_time = round((end_time - start_time) * 1000, 2)
-                
-                return {
-                    'reachable': response.status_code < 400,
-                    'status_code': response.status_code,
-                    'response_time': response_time,
-                    'method': 'GET_SSL_FALLBACK'
-                }
-            except:
-                return {
-                    'reachable': False, 
-                    'status_code': None, 
-                    'response_time': None,
-                    'error': 'SSL error'
-                }
         except Exception as e:
             return {
                 'reachable': False, 
@@ -1122,8 +1235,6 @@ def check_website_reachability(url):
             'response_time': None,
             'error': str(e)
         }
-    
-import dns.resolver  # Add this to your imports at the top
 
 def get_dns_info(url):
     """Get comprehensive DNS information"""
@@ -1155,7 +1266,7 @@ def get_dns_info(url):
         except:
             dns_results['A'] = []
         
-        # Check MX records (Mail Exchange)
+        # Check MX records
         try:
             mx_records = dns.resolver.resolve(domain, 'MX')
             dns_results['MX'] = [str(record.exchange) for record in mx_records]
@@ -1169,7 +1280,7 @@ def get_dns_info(url):
         except:
             dns_results['TXT'] = []
         
-        # Check NS records (Name Server)
+        # Check NS records
         try:
             ns_records = dns.resolver.resolve(domain, 'NS')
             dns_results['NS'] = [str(record) for record in ns_records]
@@ -1185,15 +1296,13 @@ def get_dns_info(url):
 def get_threat_intelligence(url):
     """Get comprehensive threat intelligence data"""
     try:
-        # First check if website is reachable
         reachability = check_website_reachability(url)
         if not reachability.get('reachable', False):
-            # If website is unreachable, use heuristic as primary indicator
             is_heuristic_blacklisted = is_suspicious_heuristic(url)
             
             return {
-                'safe_browsing': False,  # Can't check unreachable sites
-                'blacklisted': is_heuristic_blacklisted,  # Use heuristic result
+                'safe_browsing': False,
+                'blacklisted': is_heuristic_blacklisted,
                 'blacklist_score': 80 if is_heuristic_blacklisted else 0,
                 'threat_types': [],
                 'domain_age_days': None,
@@ -1203,29 +1312,22 @@ def get_threat_intelligence(url):
                 'website_reachable': False
             }
         
-        # If website is reachable, proceed with normal checks
         parsed = urlparse(url)
         domain = parsed.netloc
         
-        # Remove port if present
         if ':' in domain:
             domain = domain.split(':')[0]
         
-        # Use Google Safe Browsing as primary threat intelligence
         safe_browsing_result = check_google_safe_browsing(url)
         
-        # Enhanced blacklist checking using multiple heuristics
         is_heuristic_blacklisted = is_suspicious_heuristic(url)
         
-        # Additional blacklist indicators
         domain_age = get_domain_age(url)
-        is_new_domain = domain_age is not None and domain_age < 30  # Less than 30 days old
+        is_new_domain = domain_age is not None and domain_age < 30
         
-        # Check for suspicious TLDs
         suspicious_tlds = ['.tk', '.ml', '.ga', '.cf', '.gq', '.xyz', '.top']
         has_suspicious_tld = any(domain.endswith(tld) for tld in suspicious_tlds)
         
-        # Combine threat indicators
         blacklist_score = 0
         if safe_browsing_result.get('is_threat', False):
             blacklist_score += 80
@@ -1236,7 +1338,6 @@ def get_threat_intelligence(url):
         if has_suspicious_tld:
             blacklist_score += 30
         
-        # Determine if blacklisted based on score
         is_blacklisted = blacklist_score > 50
         
         return {
@@ -1252,7 +1353,6 @@ def get_threat_intelligence(url):
         }
     except Exception as e:
         print(f"Error getting threat intelligence: {e}")
-        # Fallback to heuristic check on error
         is_heuristic_blacklisted = is_suspicious_heuristic(url)
         return {
             'safe_browsing': False, 
@@ -1265,219 +1365,27 @@ def get_threat_intelligence(url):
             'heuristic_detected': is_heuristic_blacklisted,
             'website_reachable': False
         }
-# Add better error reporting
-def check_google_safe_browsing_improved(url):
-    result = check_google_safe_browsing(url)
-    if not result.get('success'):
-        return {'status': 'API Error', 'error': result.get('error')}
-    return {'status': 'Threat' if result['is_threat'] else 'Clean'}    
-# ========== MODEL LOADING ==========
-def download_ensemble_model():
-    """Download ensemble model from Google Drive - FIXED VERSION"""
-    model_path = 'models/ensemble_model.pkl'
-    
-    # Skip if already exists
-    if os.path.exists(model_path):
-        file_size = os.path.getsize(model_path) / 1024 / 1024
-        print(f"✅ Ensemble model already exists: {file_size:.2f} MB")
-        return True
-    
-    print("📥 Downloading ensemble model from Google Drive...")
-    
-    # Google Drive direct download URL (using your ID)
-    file_id = "1NM9GNh-qolCMTxk3Bds-4zjGf8uqrex"
-    
-    try:
-        # Method 1: Use gdown with direct URL
-        import gdown
-        url = f"https://drive.google.com/uc?id={file_id}"
-        gdown.download(url, model_path, quiet=False, fuzzy=True)
-        
-        if os.path.exists(model_path):
-            file_size = os.path.getsize(model_path) / 1024 / 1024
-            print(f"✅ Ensemble model downloaded successfully: {file_size:.2f} MB")
-            return True
-        else:
-            print("❌ Download failed: File not created")
-            
-    except Exception as e:
-        print(f"❌ gdown failed: {e}")
-        
-        # Method 2: Direct download with requests
-        try:
-            import requests
-            url = f"https://docs.google.com/uc?export=download&id={file_id}"
-            session = requests.Session()
-            
-            # First request to get confirmation token for large files
-            response = session.get(url, stream=True, timeout=30)
-            
-            # Save the file
-            with open(model_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=32768):
-                    if chunk:
-                        f.write(chunk)
-            
-            if os.path.exists(model_path):
-                file_size = os.path.getsize(model_path) / 1024 / 1024
-                print(f"✅ Ensemble model downloaded via requests: {file_size:.2f} MB")
-                return True
-                
-        except Exception as e2:
-            print(f"❌ Requests download also failed: {e2}")
-    
-    return False
- # ========== MODEL LOADING WITH COMPATIBILITY FIXES ==========
-import os
-import pickle
-import joblib
-import numpy as np
 
-# Fix numpy compatibility issue (common in Python 3.11)
-try:
-    # This fixes the "No module named 'numpy._core'" error
-    np.core = np
-    np._core = np
-    print("✅ Applied numpy compatibility fix")
-except:
-    pass
+# ========== FLASK ROUTES ==========
 
-models_loaded = {}
-feature_names = {}
-ML_MODELS_AVAILABLE = False
-
-print("\n" + "="*60)
-print("🤖 MODEL LOADING PROCESS")
-print("="*60)
-
-# Create models directory
-os.makedirs('models', exist_ok=True)
-
-# List available files
-print("📁 Available files in models directory:")
-if os.path.exists('models'):
-    for file in os.listdir('models'):
-        path = os.path.join('models', file)
-        if os.path.isfile(path):
-            size = os.path.getsize(path) / 1024 / 1024
-            print(f"  • {file} ({size:.2f} MB)")
-else:
-    print("  No models directory found")
-
-# Try to download ensemble model if missing
-if not os.path.exists('models/ensemble_model.pkl'):
-    download_ensemble_model()
-
-# Load models with robust error handling
-def load_model_safely(model_path, model_name):
-    """Load a model with multiple fallback methods"""
-    if not os.path.exists(model_path):
-        print(f"❌ {model_name}: File not found at {model_path}")
-        return None, []
-    
-    try:
-        file_size = os.path.getsize(model_path)
-        print(f"📦 Loading {model_name} ({file_size / 1024 / 1024:.2f} MB)...")
-        
-        # Try different loading methods
-        methods = [
-            ('joblib', lambda: joblib.load(model_path)),
-            ('pickle', lambda: pickle.load(open(model_path, 'rb'))),
-        ]
-        
-        for method_name, method_func in methods:
-            try:
-                print(f"  Trying {method_name}...")
-                data = method_func()
-                
-                # Extract model and feature names
-                model = None
-                features = []
-                
-                if isinstance(data, dict):
-                    model = data.get('ensemble_model') or data.get('model') or data.get('classifier')
-                    features = data.get('feature_names', [])
-                else:
-                    model = data
-                
-                if model is not None:
-                    print(f"  ✅ Loaded with {method_name}")
-                    return model, features
-                    
-            except Exception as e:
-                print(f"  ❌ {method_name} failed: {str(e)[:100]}")
-                continue
-        
-        print(f"❌ All loading methods failed for {model_name}")
-        return None, []
-        
-    except Exception as e:
-        print(f"❌ Error loading {model_name}: {str(e)[:200]}")
-        return None, []
-
-# Load ensemble model
-ensemble_model, ensemble_features = load_model_safely('models/ensemble_model.pkl', 'ensemble_model')
-if ensemble_model is not None:
-    models_loaded['ensemble'] = ensemble_model
-    feature_names['ensemble'] = ensemble_features
-    print("✅ Ensemble model loaded successfully")
-
-# Load original model
-original_model, original_features = load_model_safely('models/phishing_model.pkl', 'original_model')
-if original_model is not None:
-    models_loaded['original'] = original_model
-    feature_names['original'] = original_features
-    print("✅ Original model loaded successfully")
-
-# Load CNN model (optional - skip if it causes issues)
-try:
-    if os.path.exists('models/phishing_detector.h5'):
-        print("🖼️ Loading CNN model...")
-        import tensorflow as tf
-        # Disable TensorFlow warnings for cleaner output
-        tf.get_logger().setLevel('ERROR')
-        
-        # Try to load with custom objects to handle compatibility
-        cnn_model = tf.keras.models.load_model(
-            'models/phishing_detector.h5',
-            compile=False,
-            safe_mode=False  # Disable safe mode for compatibility
-        )
-        models_loaded['cnn'] = cnn_model
-        print("✅ CNN model loaded successfully")
-except Exception as e:
-    print(f"⚠️  Skipping CNN model: {str(e)[:100]}")
-    print("ℹ️  Image analysis will use fallback methods")
-
-# Update availability flag
-loaded_count = len(models_loaded)
-ML_MODELS_AVAILABLE = loaded_count > 0
-
-print("\n" + "="*60)
-print("📊 LOADING SUMMARY")
-print("="*60)
-print(f"✅ Successfully loaded: {list(models_loaded.keys())}")
-print(f"📈 Total models loaded: {loaded_count}")
-print(f"🔧 ML_MODELS_AVAILABLE: {ML_MODELS_AVAILABLE}")
-
-if ML_MODELS_AVAILABLE:
-    print("🎉 ML models are ready!")
-else:
-    print("⚠️  No ML models loaded. Using rule-based fallback.")
-    print("ℹ️  Application will still function with heuristic detection.")
-
-print("="*60 + "\n")   
-# Add the missing index route
 @app.route('/')
 def index():
-    """Main page - no authentication required"""
+    """Main page"""
     return render_template('index.html')
+
+@app.route('/health')
+def health_check():
+    """Health check endpoint"""
+    return jsonify({
+        'status': 'healthy',
+        'ml_models_loaded': ML_MODELS_AVAILABLE,
+        'models': list(models_loaded.keys()),
+        'timestamp': time.time()
+    }), 200
 
 @app.route('/scan', methods=['POST'])
 def scan_url():
-    """Scan URL - no authentication required"""
-
-
+    """Scan URL endpoint"""
     data = request.get_json()
     url_input = data.get('url', '').strip()
 
@@ -1485,24 +1393,23 @@ def scan_url():
         return jsonify({'error': 'URL is required'}), 400
 
     try:
-        # Add protocol if missing for validation
+        # Add protocol if missing
         test_url = url_input
         if not url_input.startswith(('http://', 'https://')):
             test_url = 'https://' + url_input
 
-        # Validate URL before processing
+        # Validate URL
         if not is_valid_url(test_url):
             return jsonify({
-                'error': 'Invalid URL format. Please enter a valid website address (e.g., example.com or https://example.com)'
+                'error': 'Invalid URL format. Please enter a valid website address'
             }), 400
 
-        # Use the validated URL
         url = test_url
 
-        # Check if it's a trusted subdomain first
+        # Check if it's a trusted subdomain
         is_trusted, provider = is_trusted_subdomain(url)
 
-        # Extract features for ML fallback
+        # Extract features for ML
         features = extract_basic_url_features(url)
 
         # Perform hybrid scanning
@@ -1637,21 +1544,21 @@ def scan_url():
 
     except Exception as e:
         print(f"❌ CRITICAL ERROR: {e}")
+        traceback.print_exc()
         return jsonify({'error': f'Error processing URL: {str(e)}'}), 500
 
-# [KEEP YOUR OTHER ROUTES - analyze-image, api/scan, serve_screenshot]
-
+# ========== APPLICATION STARTUP ==========
 if __name__ == '__main__':
-    import os
     port = int(os.environ.get('PORT', 5000))
     
-    print(f"\n" + "="*60)
-    print(f"🚀 Starting Flask Phishing Detector Server")
-    print(f"="*60)
+    print(f"\n" + "="*70)
+    print(f"🚀 STARTING PHISHING DETECTOR SERVER")
+    print(f"="*70)
     print(f"📍 Local: http://127.0.0.1:{port}")
     print(f"🌐 Network: http://0.0.0.0:{port}")
     print(f"🔧 ML Models: {'✅ Available' if ML_MODELS_AVAILABLE else '⚠️  Rule-based only'}")
-    print(f"="*60)
+    print(f"📊 Loaded Models: {list(models_loaded.keys())}")
+    print(f"="*70)
     
     # Use gunicorn in production, Flask dev server for local
     if os.environ.get('FLY_APP_NAME'):
@@ -1683,11 +1590,3 @@ if __name__ == '__main__':
     else:
         # Local development
         app.run(debug=False, host='0.0.0.0', port=port, use_reloader=False)
-
-
-
-
-
-
-
-
