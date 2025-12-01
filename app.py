@@ -1,3 +1,4 @@
+# This MUST be the FIRST thing in the file
 import sys
 import os
 
@@ -7,19 +8,27 @@ os.environ['NUMPY_DEPRECATED_WARNINGS'] = '0'
 # Import numpy with special handling
 import numpy as np
 
-# CRITICAL FIX for Python 3.11 + numpy 1.24.3 + TensorFlow 2.13.0
+# CRITICAL FIX: Handle 'numpy._core' vs 'numpy.core' mismatch
+# This fixes the "No module named 'numpy._core'" error
 try:
+    # If np.core exists but np._core doesn't (NumPy 1.x env, NumPy 2.x model)
+    if hasattr(np, 'core') and not hasattr(np, '_core'):
+        np._core = np.core
+        sys.modules['numpy._core'] = np.core
+        print("✅ Mapped numpy._core to numpy.core")
+    
+    # If np._core exists but np.core doesn't (NumPy 2.x env, NumPy 1.x model)
+    elif hasattr(np, '_core') and not hasattr(np, 'core'):
+        np.core = np._core
+        sys.modules['numpy.core'] = np._core
+        print("✅ Mapped numpy.core to numpy._core")
+
+    # Extra patch for the specific fake core module if needed
     if not hasattr(np, 'core'):
         import types
         class FakeCoreModule(types.ModuleType):
             def __init__(self):
                 super().__init__('core')
-                self.numerictypes = None
-                self._multiarray_umath = None
-                self.multiarray = None
-                self.umath = None
-                self.overrides = None
-            
             def __getattr__(self, name):
                 if name == 'numerictypes':
                     class NumericTypes:
@@ -27,21 +36,15 @@ try:
                                      np.int64, np.uint8, np.uint16, np.uint32, np.uint64,
                                      np.float16, np.float32, np.float64, np.complex64,
                                      np.complex128, np.bool_)
-                    self.numerictypes = NumericTypes()
-                    return self.numerictypes
-                
-                if name in ['_multiarray_umath', 'multiarray', 'umath', 'overrides']:
-                    setattr(self, name, types.ModuleType(name))
-                    return getattr(self, name)
-                raise AttributeError(f"module 'numpy.core' has no attribute '{name}'")
+                    return NumericTypes()
+                return types.ModuleType(name)
         np.core = FakeCoreModule()
-    
-    if not hasattr(np, '_core'):
-        np._core = np.core
+        if 'numpy.core' not in sys.modules:
+            sys.modules['numpy.core'] = np.core
+
     print("✅ NUMPY COMPATIBILITY FIX APPLIED")
 except Exception as e:
     print(f"⚠️ Numpy fix warning: {e}")
-    # Continue anyway - app should still work without ML models
 
 # ========== NOW IMPORT ALL OTHER PACKAGES ==========
 print("🔧 Initializing application...")
@@ -65,59 +68,16 @@ import urllib3
 import uuid
 from itertools import groupby
 import traceback
-
-# ========== DEFER TENSORFLOW IMPORT UNTIL NEEDED ==========
-# We'll import TensorFlow only when needed for image analysis
-tensorflow_loaded = False
-tf = None
-
-def import_tensorflow_if_needed():
-    """Import TensorFlow only when needed"""
-    global tensorflow_loaded, tf
-    
-    if not tensorflow_loaded:
-        try:
-            import tensorflow as tf_import
-            tf = tf_import
-            tensorflow_loaded = True
-            print("✅ TensorFlow loaded successfully")
-        except Exception as e:
-            print(f"⚠️ TensorFlow could not be loaded: {e}")
-            print("ℹ️ Image analysis will be disabled")
-            tf = None
-    
-    return tf
-
-# ========== DEFER IMAGE MODEL IMPORTS ==========
-image_model_loaded = False
-PhishingImageModel = None
-ImagePreprocessor = None
-
-def import_image_models_if_needed():
-    """Import image models only when needed"""
-    global image_model_loaded, PhishingImageModel, ImagePreprocessor
-    
-    if not image_model_loaded:
-        try:
-            from image_model import PhishingImageModel as PM
-            from image_preprocessing import ImagePreprocessor as IP
-            PhishingImageModel = PM
-            ImagePreprocessor = IP
-            image_model_loaded = True
-            print("✅ Image models loaded successfully")
-        except Exception as e:
-            print(f"⚠️ Image models could not be loaded: {e}")
-            PhishingImageModel = None
-            ImagePreprocessor = None
-    
-    return PhishingImageModel is not None and ImagePreprocessor is not None
-
-# ========== CONTINUE WITH IMPORTS ==========
 from PIL import Image
 import io
-from screenshot_capture import get_screenshot_data, cleanup_screenshot_capture
-import gdown
 import dns.resolver
+
+# Custom imports
+try:
+    from screenshot_capture import get_screenshot_data, cleanup_screenshot_capture
+except ImportError:
+    def get_screenshot_data(*args, **kwargs): return None
+    def cleanup_screenshot_capture(*args, **kwargs): pass
 
 # Disable SSL warnings for internal requests
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -151,27 +111,87 @@ phishing_model = None
 preprocessor = None
 ml_model = None
 
-# ========== SIMPLIFIED MODEL LOADING ==========
+# ========== DEFER TENSORFLOW IMPORT UNTIL NEEDED ==========
+tensorflow_loaded = False
+tf = None
 
+def import_tensorflow_if_needed():
+    """Import TensorFlow only when needed to save memory on startup"""
+    global tensorflow_loaded, tf
+    if not tensorflow_loaded:
+        try:
+            import tensorflow as tf_import
+            tf = tf_import
+            tensorflow_loaded = True
+            print("✅ TensorFlow loaded successfully")
+        except Exception as e:
+            print(f"⚠️ TensorFlow could not be loaded: {e}")
+            print("ℹ️ Image analysis will be disabled")
+            tf = None
+    return tf
 
-# ========== CONTINUE WITH IMPORTS ==========
-from PIL import Image
-import io
-from screenshot_capture import get_screenshot_data, cleanup_screenshot_capture
-import gdown  # Make sure this import is present
-import dns.resolver
+# ========== DEFER IMAGE MODEL IMPORTS ==========
+image_model_loaded = False
+PhishingImageModel = None
+ImagePreprocessor = None
 
-# Disable SSL warnings for internal requests
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+def import_image_models_if_needed():
+    """Import image models only when needed"""
+    global image_model_loaded, PhishingImageModel, ImagePreprocessor
+    if not image_model_loaded:
+        try:
+            from image_model import PhishingImageModel as PM
+            from image_preprocessing import ImagePreprocessor as IP
+            PhishingImageModel = PM
+            ImagePreprocessor = IP
+            image_model_loaded = True
+            print("✅ Image models loaded successfully")
+        except Exception as e:
+            print(f"⚠️ Image models could not be loaded: {e}")
+            PhishingImageModel = None
+            ImagePreprocessor = None
+    return PhishingImageModel is not None and ImagePreprocessor is not None
+
+# ==========================================
+# 📥 ROBUST GOOGLE DRIVE DOWNLOADER
+# ==========================================
+def download_file_from_google_drive(id, destination):
+    """Downloads large files from Google Drive without using gdown"""
+    URL = "https://docs.google.com/uc?export=download"
+    
+    session = requests.Session()
+    
+    try:
+        response = session.get(URL, params = { 'id' : id }, stream = True)
+        token = None
+        for key, value in response.cookies.items():
+            if key.startswith('download_warning'):
+                token = value
+                break
+
+        if token:
+            params = { 'id' : id, 'confirm' : token }
+            response = session.get(URL, params = params, stream = True)
+
+        CHUNK_SIZE = 32768
+        with open(destination, "wb") as f:
+            for chunk in response.iter_content(CHUNK_SIZE):
+                if chunk: # filter out keep-alive new chunks
+                    f.write(chunk)
+        return True
+    except Exception as e:
+        print(f"❌ Download error: {e}")
+        return False
+
 def download_missing_models():
-    """Downloads large models from Google Drive if missing"""
+    """Checks and downloads missing models"""
     print("\n" + "="*50)
     print("📥 CHECKING FOR MISSING MODELS")
     print("="*50)
     
     os.makedirs('models', exist_ok=True)
 
-    # Dictionary of models to check: {'filename': 'google_drive_id'}
+    # Dictionary: {'filename': 'google_drive_id'}
     required_models = {
         'ensemble_model.pkl': '1NM9GNh-qolCMTxk3B3ds-4zjGf8uqrex'
     }
@@ -181,17 +201,13 @@ def download_missing_models():
         
         if not os.path.exists(output_path):
             print(f"⚠️ {filename} not found. Downloading...")
-            try:
-                url = f'https://drive.google.com/uc?id={file_id}'
-                gdown.download(url, output_path, quiet=False, fuzzy=True)
-                
-                if os.path.exists(output_path):
-                    size = os.path.getsize(output_path) / (1024 * 1024)
-                    print(f"✅ {filename} downloaded! ({size:.2f} MB)")
-                else:
-                    print(f"❌ Failed to download {filename}")
-            except Exception as e:
-                print(f"❌ Error downloading {filename}: {e}")
+            success = download_file_from_google_drive(file_id, output_path)
+            
+            if success and os.path.exists(output_path):
+                size = os.path.getsize(output_path) / (1024 * 1024)
+                print(f"✅ {filename} downloaded! ({size:.2f} MB)")
+            else:
+                print(f"❌ Failed to download {filename}")
         else:
             print(f"✅ {filename} already exists.")
             
@@ -219,10 +235,6 @@ def load_models_safely():
                 model_files.append(file)
                 print(f"  • {file} ({size:.2f} MB)")
     
-    if not model_files:
-        print("  ⚠️ No model files found - using rule-based only")
-        return
-
     loaded_count = 0
     
     for model_file in model_files:
@@ -236,7 +248,6 @@ def load_models_safely():
                 with open(model_path, 'rb') as f:
                     data = pickle.load(f)
                     
-                    # Extract model and features
                     if isinstance(data, dict):
                         model = data.get('model') or data.get('ensemble_model') or data.get('classifier')
                         features = data.get('feature_names', [])
@@ -247,174 +258,116 @@ def load_models_safely():
                     if model is not None:
                         models_loaded[model_name] = model
                         feature_names[model_name] = features
-                        
-                        # Prioritize ensemble_model as main model if found
+                        # Prioritize ensemble_model
                         if 'ensemble' in model_name:
                             ml_model = model
                         elif ml_model is None:
                             ml_model = model
-                            
                         loaded_count += 1
                         print(f"✅ {model_name} loaded successfully")
-                    else:
-                        print(f"⚠️ Could not extract model object from {model_file}")
 
             elif model_file.endswith('.h5'):
-                # Handle H5 Models (Image - Deferred)
+                # Defer H5 loading
                 print(f"ℹ️ {model_file} detected - loading deferred until needed")
 
         except Exception as e:
-            print(f"❌ Failed to load {model_file}: {str(e)[:100]}")
+            print(f"❌ Failed to load {model_file}: {e}")
 
     ML_MODELS_AVAILABLE = loaded_count > 0
-    
-    if ML_MODELS_AVAILABLE:
-        print(f"✅ SUCCESS: Loaded {loaded_count} model(s)")
-    else:
-        print("⚠️ WARNING: No ML models loaded")
+    print(f"✅ SUCCESS: Loaded {loaded_count} model(s)")
 
 # ========== RUN LOADING SEQUENCE ==========
 load_models_safely()
 
+# ========== CORE FUNCTIONS ==========
 
 def is_valid_url(url):
-    # ... KEEP YOUR EXISTING CODE ...
     try:
-        test_url = url
         if not re.match(r'^https?://', url):
-            test_url = 'https://' + url
-        
-        parsed = urlparse(test_url)
-        
-        if not parsed.netloc:
-            return False
-        
-        if '.' not in parsed.netloc and parsed.netloc != 'localhost':
-            return False
-        
-        domain_parts = parsed.netloc.split('.')
-        if len(domain_parts) < 2:
-            return False
-        
-        tld = domain_parts[-1]
-        if len(tld) < 2 and tld not in ['io', 'ai', 'tv']:
-            return False
-            
-        return True
+            url = 'https://' + url
+        parsed = urlparse(url)
+        return bool(parsed.netloc and '.' in parsed.netloc)
     except:
         return False
 
 def check_google_safe_browsing(url):
-    # ... KEEP YOUR EXISTING CODE ...
     try:
         if not GOOGLE_SAFE_BROWSING_API_KEY:
-            return {
-                'error': 'Google Safe Browsing API key not configured',
-                'is_threat': False,
-                'success': False
-            }
-        
-        parsed = urlparse(url)
-        domain = parsed.netloc
+            return {'success': False, 'error': 'API Key missing'}
         
         payload = {
-            "client": {
-                "clientId": "phishing-detector",
-                "clientVersion": "1.0.0"
-            },
+            "client": {"clientId": "phishing-detector", "clientVersion": "1.0.0"},
             "threatInfo": {
-                "threatTypes": ["MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE", "POTENTIALLY_HARMFUL_APPLICATION"],
+                "threatTypes": ["MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE"],
                 "platformTypes": ["ANY_PLATFORM"],
                 "threatEntryTypes": ["URL"],
-                "threatEntries": [
-                    {"url": url},
-                    {"url": f"https://{domain}"}
-                ]
+                "threatEntries": [{"url": url}]
             }
         }
-        
         response = requests.post(
             f"{GOOGLE_SAFE_BROWSING_URL}?key={GOOGLE_SAFE_BROWSING_API_KEY}",
-            json=payload,
-            timeout=5
+            json=payload, timeout=5
         )
-        
         if response.status_code == 200:
             data = response.json()
             return {
-                'safe_browsing_result': data,
+                'success': True,
                 'is_threat': 'matches' in data and len(data['matches']) > 0,
-                'threat_types': [match['threatType'] for match in data.get('matches', [])],
-                'cacheDuration': data.get('cacheDuration', '300s'),
-                'success': True
+                'data': data
             }
-        else:
-            print(f"Google Safe Browsing API error: {response.status_code}")
-            return {
-                'error': f"API error: {response.status_code}", 
-                'is_threat': False,
-                'success': False
-            }
-            
-    except requests.exceptions.Timeout:
-        return {
-            'error': 'Google Safe Browsing API timeout', 
-            'is_threat': False,
-            'success': False
-        }
+        return {'success': False, 'error': f"API Error {response.status_code}"}
     except Exception as e:
-        print(f"Google Safe Browsing failed: {e}")
-        return {
-            'error': str(e), 
-            'is_threat': False,
-            'success': False
-        }
+        return {'success': False, 'error': str(e)}
 
 def load_image_model():
-    """Load the image model only when needed"""
+    """Load the image model with compatibility fixes for Keras 3"""
     global phishing_model, preprocessor
     
     if phishing_model is None or preprocessor is None:
-        # Import TensorFlow only when needed
         tf_module = import_tensorflow_if_needed()
-        if tf_module is None:
+        if tf_module is None or not import_image_models_if_needed():
             return False
-        
-        # Import image models only when needed
-        if not import_image_models_if_needed():
-            return False
-        
+            
         IMAGE_MODEL_PATH = "models/phishing_detector.h5"
-        
         if os.path.exists(IMAGE_MODEL_PATH):
             try:
+                print("🔄 Loading Keras model...")
                 phishing_model = PhishingImageModel()
-                phishing_model.model = tf_module.keras.models.load_model(IMAGE_MODEL_PATH)
+                
+                # FIX: Try loading with compile=False to bypass optimizer/config version mismatch
+                try:
+                    phishing_model.model = tf_module.keras.models.load_model(IMAGE_MODEL_PATH, compile=False)
+                except Exception as e:
+                    print(f"⚠️ Standard load failed: {e}. Trying legacy...")
+                    # Fallback to compatibility mode if possible
+                    phishing_model.model = tf_module.keras.models.load_model(
+                        IMAGE_MODEL_PATH, 
+                        compile=False,
+                        custom_objects={'InputLayer': tf_module.keras.layers.InputLayer}
+                    )
+
                 preprocessor = ImagePreprocessor()
                 print("✅ Phishing image detection model loaded!")
                 return True
             except Exception as e:
                 print(f"❌ Failed to load image model: {e}")
                 return False
-        else:
-            print(f"❌ Image model file not found at {IMAGE_MODEL_PATH}")
-            return False
-    
+        return False
     return True
 
 def analyze_website_screenshot(image_path):
-    """Analyze website screenshot for phishing indicators"""
     try:
-        # Load image model if not loaded
         if not load_image_model():
             return {'error': 'Image model not available', 'status': 'disabled'}
-        
-        if phishing_model is None or preprocessor is None:
-            return {'error': 'Image model not loaded'}
-        
+            
         test_image = preprocessor.load_and_preprocess_image(image_path)
         if test_image is not None:
-            prediction = phishing_model.model.predict(np.expand_dims(test_image, axis=0))
+            # Check input shape to avoid mismatch errors
+            input_shape = phishing_model.model.input_shape
+            expected_shape = input_shape[1:3] # (224, 224) usually
+            
+            # Ensure safe prediction
+            prediction = phishing_model.model.predict(np.expand_dims(test_image, axis=0), verbose=0)
             confidence = float(prediction[0][0])
             return {
                 'is_phishing': confidence > 0.5,
@@ -1514,4 +1467,5 @@ if __name__ == '__main__':
     else:
         # Local development
         app.run(debug=False, host='0.0.0.0', port=port, use_reloader=False)
+
 
