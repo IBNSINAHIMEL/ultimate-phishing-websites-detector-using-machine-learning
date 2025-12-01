@@ -163,15 +163,22 @@ preprocessor = None
 
 def load_image_model():
     global phishing_model, preprocessor
+
+    IMAGE_MODEL_PATH = "models/phishing_detector.h5"  # <-- fix here if needed
+
+    if not os.path.exists(IMAGE_MODEL_PATH):
+        print(f"❌ Image model file NOT FOUND at {IMAGE_MODEL_PATH}")
+        print("Available files in models/:", os.listdir("models"))
+        return
+
     try:
         phishing_model = PhishingImageModel()
-        phishing_model.model = tf.keras.models.load_model('models/phishing_detector.h5')
+        phishing_model.model = tf.keras.models.load_model(IMAGE_MODEL_PATH)
         preprocessor = ImagePreprocessor()
-        print("✅ Phishing detection model loaded successfully!")
+        print("✅ Phishing image detection model loaded successfully!")
     except Exception as e:
         print(f"❌ Failed to load image model: {e}")
 
-load_image_model()
 
 def analyze_website_screenshot(image_path):
     global phishing_model, preprocessor
@@ -1296,41 +1303,76 @@ def download_large_model():
 # Call this function before loading models
 download_large_model()    
 # Load both models
-MODEL_PATHS = {
-    'original': 'models/phishing_model.pkl',
-    'ensemble': 'models/ensemble_model.pkl'
-}
+import os
+import pickle
+import joblib
+import tensorflow as tf
 
-# Initialize global variables
+# Auto-detect CNN model file
+cnn_file = None
+for f in os.listdir("models"):
+    if f.endswith(".h5"):
+        cnn_file = f
+        break
+
+MODEL_PATH_ORIGINAL = "models/phishing_model.pkl"
+MODEL_PATH_ENSEMBLE = "models/ensemble_model.pkl"
+MODEL_PATH_CNN = f"models/{cnn_file}" if cnn_file else None
+
 models_loaded = {}
 feature_names = {}
 threat_intelligence = {}
 
-# Load original model
-if os.path.exists(MODEL_PATHS['original']):
-    try:
-        with open(MODEL_PATHS['original'], 'rb') as f:
-            data = pickle.load(f)
-        models_loaded['original'] = data['model']
-        feature_names['original'] = data['feature_names']
-        print("✓ Original model loaded")
-    except Exception as e:
-        print(f"❌ Error loading original model: {e}")
+print("\n📌 Checking model files...\n")
+print("Original:", os.path.abspath(MODEL_PATH_ORIGINAL))
+print("Ensemble:", os.path.abspath(MODEL_PATH_ENSEMBLE))
+print("CNN path:", MODEL_PATH_CNN)
 
-# Load ensemble model (if available)
-if os.path.exists(MODEL_PATHS['ensemble']):
+
+# Load ORIGINAL MODEL
+if os.path.exists(MODEL_PATH_ORIGINAL):
     try:
-        model_data = joblib.load(MODEL_PATHS['ensemble'])
-        models_loaded['ensemble'] = model_data['ensemble_model']
-        feature_names['ensemble'] = model_data['feature_names']
-        threat_intelligence = model_data.get('threat_intelligence', {})
-        print("✓ Ensemble model loaded")
-        print("✓ Threat intelligence loaded")
-        print("Ensemble model ready - debug function available")
+        with open(MODEL_PATH_ORIGINAL, "rb") as f:
+            data = pickle.load(f)
+        models_loaded["original"] = data["model"]
+        feature_names["original"] = data["feature_names"]
+        print("✅ Original model loaded")
     except Exception as e:
-        print(f"❌ Error loading ensemble model: {e}")
+        print("❌ Failed loading original model:", e)
 else:
-    print("ℹ️  Ensemble model not found. Using original model only.")
+    print("❌ Original model file NOT FOUND")
+
+
+# Load ENSEMBLE MODEL
+if os.path.exists(MODEL_PATH_ENSEMBLE):
+    try:
+        data = joblib.load(MODEL_PATH_ENSEMBLE)
+        models_loaded["ensemble"] = data["ensemble_model"]
+        feature_names["ensemble"] = data["feature_names"]
+        threat_intelligence = data.get("threat_intelligence", {})
+        print("✅ Ensemble model loaded")
+    except Exception as e:
+        print("❌ Failed loading ensemble model:", e)
+else:
+    print("❌ Ensemble model file NOT FOUND")
+
+
+# Load CNN MODEL
+if MODEL_PATH_CNN and os.path.exists(MODEL_PATH_CNN):
+    try:
+        models_loaded["cnn"] = tf.keras.models.load_model(MODEL_PATH_CNN)
+        print("✅ CNN model loaded")
+    except Exception as e:
+        print("❌ Failed loading CNN model:", e)
+else:
+    print("❌ CNN model file NOT FOUND")
+
+
+# FINAL CHECK
+if not models_loaded:
+    print("\n🚨 ERROR: No models loaded at all!\n")
+else:
+    print("\n🎉 MODELS SUCCESSFULLY LOADED:", list(models_loaded.keys()), "\n")
 
 # Add the missing index route
 @app.route('/')
@@ -1518,6 +1560,7 @@ if __name__ == '__main__':
     print(f"🌐 Network: http://0.0.0.0:{port}")
     
     app.run(debug=False, host='0.0.0.0', port=port, use_reloader=False)
+
 
 
 
