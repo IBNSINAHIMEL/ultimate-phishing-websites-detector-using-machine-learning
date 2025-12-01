@@ -1,5 +1,6 @@
 from flask import Flask, render_template, request, jsonify
 import pickle
+import atexit
 import joblib
 import os
 import pandas as pd
@@ -1516,6 +1517,7 @@ if __name__ == '__main__':
     print(f"🌐 Network: http://0.0.0.0:{port}")
     
     app.run(debug=False, host='0.0.0.0', port=port, use_reloader=False)
+
 
 
 
